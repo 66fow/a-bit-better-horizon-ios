@@ -147,7 +147,7 @@ impl SpriteAnimator {
                 group,
             });
         }
-        let Some(pipeline) = pipeline else {
+        let Some((pipeline, layout)) = pipeline else {
             let groups = keys
                 .iter()
                 .zip(&counts)
@@ -193,7 +193,6 @@ impl SpriteAnimator {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let layout = pipeline.get_bind_group_layout(0);
         let groups = keys
             .iter()
             .zip(&counts)
@@ -364,15 +363,19 @@ impl SpriteAnimator {
     }
 }
 
-/// `animate.wgsl`'s pipeline, unless the device fails to make it: an OpenGL
-/// driver can list compute shaders among its extensions while wgpu writes
-/// the GLSL version of its core version, which has none (Mesa's
-/// `MESA_GL_VERSION_OVERRIDE`, older drivers).
-fn pipeline(device: &wgpu::Device) -> Option<wgpu::ComputePipeline> {
-    // The scopes go with the module to the deep stack (`gfx::shader_module`).
+/// `animate.wgsl`'s pipeline and the bind group layout of its group 0,
+/// unless the device fails to make the pipeline: an OpenGL driver can list
+/// compute shaders among its extensions while wgpu writes the GLSL version
+/// of its core version, which has none (Mesa's `MESA_GL_VERSION_OVERRIDE`,
+/// older drivers). A device lost between the scopes' pushes answers pipeline
+/// creation with a silent placeholder and reports its invalidity only when
+/// the layout is asked for — inside the scopes that error is caught, outside
+/// them it is uncaptured and panics (#3866).
+fn pipeline(device: &wgpu::Device) -> Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)> {
+    // Shader modules, pipelines and their layout validation share a deep stack and error scopes.
     crate::gfx::deep_stack(|| pipeline_here(device))
 }
-fn pipeline_here(device: &wgpu::Device) -> Option<wgpu::ComputePipeline> {
+fn pipeline_here(device: &wgpu::Device) -> Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout)> {
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -387,9 +390,10 @@ fn pipeline_here(device: &wgpu::Device) -> Option<wgpu::ComputePipeline> {
         compilation_options: Default::default(),
         cache: None,
     });
+    let layout = pipeline.get_bind_group_layout(0);
     let internal = pollster::block_on(internal.pop());
     match internal.or(pollster::block_on(validation.pop())) {
-        None => Some(pipeline),
+        None => Some((pipeline, layout)),
         Some(e) => {
             log::warn!("Horizon renderer: animated sprites drawn on the CPU ({e})");
             None

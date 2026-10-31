@@ -1,21 +1,22 @@
 //! `/place template` (PlaceCommand): a saved structure template placed with
 //! rotation, mirroring and integrity.
 use super::{Arg, Context, Game, R, err};
-use horizon_client::{save, text::Text};
-use horizon_core::random::{LegacyRandom, RandomSource};
+use crate::game::structure_blocks::{load_settings, template_size};
+use horizon_client::text::Text;
+use horizon_core::position::BlockPos;
 use horizon_world::{
     compression::Compression,
     nbt::{self, Limits, Tag},
-    worldgen::structure::{Mirror, Rotation, StateTransforms, StructureTemplate},
+    worldgen::structure::{Mirror, Rotation, StateTransforms},
 };
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 fn num(n: impl std::fmt::Display) -> Text {
     Text::literal(n.to_string())
 }
 
 impl Game<'_> {
-    fn state_transforms(&self) -> Option<&'static StateTransforms> {
+    pub(in crate::game) fn state_transforms(&self) -> Option<&'static StateTransforms> {
         static TRANSFORMS: OnceLock<Option<StateTransforms>> = OnceLock::new();
         TRANSFORMS
             .get_or_init(|| {
@@ -29,9 +30,9 @@ impl Game<'_> {
             })
             .as_ref()
     }
-    /// A template by id: a structure block's save in the world, then the
-    /// vanilla templates.
-    fn load_template(&self, id: &str) -> Option<Arc<StructureTemplate>> {
+    /// A template's tree by id, as `StructureTemplateManager` reads it from
+    /// disk.
+    pub(in crate::game) fn read_template_tag(&self, id: &str) -> Option<Tag> {
         let (ns, path) = id.split_once(':').unwrap_or(("minecraft", id));
         let candidates = [
             self.world_root
@@ -45,7 +46,6 @@ impl Game<'_> {
                 .join(ns)
                 .join(format!("{path}.nbt")),
         ];
-        let transforms = self.state_transforms()?;
         for file in candidates {
             let Ok(bytes) = std::fs::read(&file) else {
                 continue;
@@ -56,11 +56,7 @@ impl Game<'_> {
             let Ok((named, _)) = nbt::read_named(&raw, Limits::templates()) else {
                 continue;
             };
-            return Some(Arc::new(StructureTemplate::from_nbt(
-                &named.tag,
-                self.pack.assets.registry,
-                transforms,
-            )));
+            return Some(named.tag);
         }
         None
     }
@@ -150,9 +146,12 @@ impl Game<'_> {
                     max_depth,
                     position: pos,
                 };
-                let placed = self.with_level(|b, level, ticks| {
-                    b.place_jigsaw(level, ticks, pos, || terrain.jigsaw_pieces(&query))
+                let (placed, entities) = self.with_level(|b, level, ticks| {
+                    b.place_jigsaw(level, ticks, pos, false, || terrain.jigsaw_pieces(&query))
                 });
+                for entity in entities {
+                    self.spawn_entity_from_nbt(Tag::Compound(entity));
+                }
                 self.process_level_events()
                     .map_err(|_| err("command.failed", &[]))?;
                 if !placed {
@@ -177,39 +176,24 @@ impl Game<'_> {
                     return Err(err("commands.place.structure.invalid", &[&structure]));
                 }
                 let pos = self.place_pos(ctx, "pos")?;
+                // PlaceCommand.placeStructure: Structure.generate for the
+                // position's chunk with its `biome -> true` predicate, then
+                // placeInChunk for every chunk of the start's box.
                 let terrain = self
                     .end
                     .locator()
                     .ok_or_else(|| err("command.failed", &[]))?;
-                // PlaceCommand.placeStructure: generate the start at the position's chunk, whatever the biome...
-                let placed = terrain
-                    .structure_start(
-                        &structure,
-                        horizon_core::position::ChunkPos::new(pos[0] >> 4, pos[2] >> 4),
-                    )
+                let start = terrain
+                    .structure_start(&structure, pos[0] >> 4, pos[2] >> 4)
                     .ok_or_else(|| err("commands.place.structure.failed", &[]))?;
-                // ...then place it in every chunk its box covers, which must all be loaded.
-                let mut min = [i32::MAX; 2];
-                let mut max = [i32::MIN; 2];
-                for piece in &placed.start.pieces {
-                    let b = piece.bounding_box();
-                    min = [min[0].min(b.min[0] >> 4), min[1].min(b.min[2] >> 4)];
-                    max = [max[0].max(b.max[0] >> 4), max[1].max(b.max[2] >> 4)];
+                let (min, max) = (start.bounding_box.min, start.bounding_box.max);
+                self.place_check_loaded([min[0] >> 4, min[2] >> 4], [max[0] >> 4, max[2] >> 4])?;
+                let (placed, entities) =
+                    self.with_level(|b, level, ticks| b.place_structure(level, ticks, &start));
+                for entity in entities {
+                    self.spawn_entity_from_nbt(Tag::Compound(entity));
                 }
-                self.place_check_loaded(min, max)?;
-                let chunks: Vec<[i32; 2]> = (min[0]..=max[0])
-                    .flat_map(|x| (min[1]..=max[1]).map(move |z| [x, z]))
-                    .collect();
-                let (min_y, max_y) = (
-                    horizon_client::chunk::MIN_Y,
-                    horizon_client::chunk::MIN_Y + horizon_client::chunk::HEIGHT - 1,
-                );
-                let done = self.with_level(|b, level, ticks| {
-                    b.place_structure(level, ticks, &placed, &chunks, min_y, max_y)
-                });
-                self.process_level_events()
-                    .map_err(|_| err("command.failed", &[]))?;
-                if !done {
+                if !placed {
                     return Err(err("commands.place.structure.failed", &[]));
                 }
                 self.feedback(Text::translate(
@@ -247,73 +231,20 @@ impl Game<'_> {
             _ => 1.0,
         };
         let seed = match ctx.get("seed") {
-            Some(Arg::Int(s)) => i64::from(*s),
+            Some(Arg::Int(s)) => *s,
             _ => 0,
         };
         let strict = ctx.has("strict");
-        let template = self
-            .load_template(&id)
-            .filter(|t| !t.palettes().is_empty())
+        let entry = self
+            .template_entry(&id)
             .ok_or_else(|| err("commands.place.template.invalid", &[&id]))?;
-        let transforms = self
-            .state_transforms()
-            .ok_or_else(|| err("commands.place.template.invalid", &[&id]))?;
-        let mut random = LegacyRandom::new(if seed == 0 {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(1, |d| d.as_millis() as i64)
-        } else {
-            seed
-        });
-        let palette = template.palette_index(&mut random);
-        let blocks = template.palettes()[palette].blocks().to_vec();
-        let mut placed = 0;
-        for b in &blocks {
-            if integrity < 1.0 && random.next_float() > integrity {
-                continue;
-            }
-            let t = StructureTemplate::transform(b.pos, mirror, rotation, [0, 0, 0]);
-            let at = [pos[0] + t[0], pos[1] + t[1], pos[2] + t[2]];
-            if !self.world.chunks.contains_key(&(at[0] >> 4, at[2] >> 4)) {
-                continue;
-            }
-            let state = transforms.rotate(transforms.mirror(b.state, mirror), rotation);
-            if self.place_state(at, state, strict).is_ok() {
-                placed += 1;
-            }
-            if let Some(data) = &b.nbt {
-                let mut tag = Tag::Compound(data.clone());
-                if let Tag::Compound(c) = &mut tag {
-                    c.insert("x".into(), Tag::Int(at[0]));
-                    c.insert("y".into(), Tag::Int(at[1]));
-                    c.insert("z".into(), Tag::Int(at[2]));
-                }
-                if let Some((_, entity)) = save::decode_block_entity(&tag) {
-                    let key = (at[0], at[1], at[2]);
-                    self.world.block_entities.insert(key, entity);
-                    self.update_spawner_display(key);
-                }
-            }
-        }
-        // Entities saved with the template.
-        for e in &template.entities {
-            let p = StructureTemplate::transform_vec(e.pos, mirror, rotation, [0, 0, 0]);
-            let at = [
-                f64::from(pos[0]) + p[0],
-                f64::from(pos[1]) + p[1],
-                f64::from(pos[2]) + p[2],
-            ];
-            let mut tag = Tag::Compound(e.nbt.clone());
-            if let Tag::Compound(c) = &mut tag {
-                c.insert(
-                    "Pos".into(),
-                    Tag::List(at.iter().map(|v| Tag::Double(v.to_bits())).collect()),
-                );
-                c.remove(&"UUID".into());
-            }
-            self.spawn_entity_from_nbt(tag);
-        }
-        if placed == 0 {
+        let size = template_size(&entry.tag);
+        let end = [pos[0] + size[0], pos[2] + size[2]];
+        self.place_check_loaded([pos[0] >> 4, pos[2] >> 4], [end[0] >> 4, end[1] >> 4])?;
+        // `placeInWorld(level, pos, pos, settings, createRandom(seed), flags)`.
+        let settings = load_settings(mirror, rotation, integrity, i64::from(seed), strict);
+        let at = BlockPos::new(pos[0], pos[1], pos[2]);
+        if !self.place_template_entry(&entry, at, settings, mirror, rotation) {
             return Err(err("commands.place.template.failed", &[]));
         }
         self.feedback(Text::translate(

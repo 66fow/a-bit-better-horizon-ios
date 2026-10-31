@@ -15,10 +15,11 @@ on:
     types: [created]
 permissions:
   contents: read
+# Desktop release and governance automation belongs to the upstream repository.
 jobs:
   command:
     # Every other comment skips here, before a runner starts.
-    if: startsWith(github.event.comment.body, '/nightly') && github.event.comment.user.type != 'Bot'
+    if: github.repository == 'horizon-rust/horizon' && (startsWith(github.event.comment.body, '/nightly') && github.event.comment.user.type != 'Bot')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

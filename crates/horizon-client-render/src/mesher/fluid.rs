@@ -242,8 +242,11 @@ pub(super) fn tesselate(
     } else {
         0xFF_FFFF
     };
-    // Lava emits light level 15.
-    let emission = if water { 0 } else { 15 };
+    let emission = if water {
+        0
+    } else {
+        crate::mesher::INCANDESCENT
+    };
     let color = |by: f32| {
         let rgb = [16, 8, 0].map(|shift| lighting::scale((tint >> shift & 255) as i32, by) as u32);
         crate::mesher::emitting(pack_rgb(rgb), emission)
@@ -492,10 +495,10 @@ mod tests {
     #[test]
     fn water_lighting_is_the_biome_tint_without_shade_or_emission_bits() {
         // Water biome tint (63, 118, 228) and the same shaded by 0.5
-        // (31, 59, 114), both with the emission bits of level 9 in the alpha.
-        let raw = crate::mesher::emitting(pack_rgb([63, 118, 228]), 9);
-        let shaded = crate::mesher::emitting(pack_rgb([31, 59, 114]), 9);
-        assert_eq!((raw >> 24, shaded >> 24), (0xF6, 0xF6));
+        // (31, 59, 114), both with the emission bits of the bright HDR tier in the alpha.
+        let raw = crate::mesher::emitting(pack_rgb([63, 118, 228]), crate::mesher::BRIGHT);
+        let shaded = crate::mesher::emitting(pack_rgb([31, 59, 114]), crate::mesher::BRIGHT);
+        assert_eq!((raw >> 24, shaded >> 24), (0xFC, 0xFC));
         let l = quad_lighting(raw, shaded);
         assert_eq!(l.tint, 0xFFE4_763F);
         assert_eq!(l.shaded_tint, 0xFF72_3B1F);
@@ -504,9 +507,9 @@ mod tests {
     }
     #[test]
     fn lava_lighting_is_white_and_opaque_despite_full_emission() {
-        let white = crate::mesher::emitting(pack_rgb([255; 3]), 15);
-        let shaded = crate::mesher::emitting(pack_rgb([127; 3]), 15);
-        assert_eq!(white >> 24, 0xF0);
+        let white = crate::mesher::emitting(pack_rgb([255; 3]), crate::mesher::VERY_BRIGHT);
+        let shaded = crate::mesher::emitting(pack_rgb([127; 3]), crate::mesher::VERY_BRIGHT);
+        assert_eq!(white >> 24, 0xFB);
         let l = quad_lighting(white, shaded);
         assert_eq!(l.tint, 0xFFFF_FFFF);
         assert_eq!(l.shaded_tint, 0xFF7F_7F7F);

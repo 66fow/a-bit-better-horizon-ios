@@ -106,6 +106,10 @@ impl Game<'_> {
         self.extras.fps.record(now, elapsed.as_secs_f32() * 1000.0);
         self.native_frame(elapsed);
     }
+    /// The server this game connected to last.
+    pub(super) fn server_address(&self) -> Option<&str> {
+        self.extras.reconnect.address()
+    }
     /// Auto-reconnect: a connection to `address` as `name` starts.
     pub(super) fn extras_connecting(&mut self, address: &str, name: &str) {
         self.extras.reconnect.connecting(address, name);

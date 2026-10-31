@@ -153,8 +153,8 @@ fn lighting_alpha_is_ao_not_the_emission_bits_of_the_vertex_colour() {
     let rgb = tinted(63, tint);
     assert_eq!(rgb, [35, 46, 21]);
     assert_eq!(pack_rgb(rgb), 0xFF15_2E23);
-    let native = emitting(pack_rgb(rgb), 9);
-    assert_eq!(native, 0xF615_2E23);
+    let native = emitting(pack_rgb(rgb), BRIGHT);
+    assert_eq!(native, 0xFC15_2E23);
     // The sidecar data is unaffected by emission: tint and shaded tint are
     // opaque and the vertex alpha is the AO level.
     let l = model_lighting(tint, 0.25, [255, 200, 100, 50]);

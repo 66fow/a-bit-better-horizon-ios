@@ -29,7 +29,8 @@ impl Screen {
             | Self::Creative
             | Self::Inventory
             | Self::Dead
-            | Self::CommandBlock => false,
+            | Self::CommandBlock
+            | Self::BlockEditor => false,
             // WinScreen.extractBackground: the poem fills the screen with the End portal, the
             // credits alone blur. Game::menu_blur knows which one rolls.
             Self::Win => false,
@@ -97,7 +98,34 @@ const FRIENDS_ICON: usize = 2;
 const SPLIT_ICON: usize = 4;
 const SPLIT_LABEL: &str = "Splitscreen";
 const SPLIT_LEAVE_LABEL: &str = "End splitscreen";
-const SPLIT_ACTION: u8 = 12;
+const SPLIT_ACTION: u8 = 14;
+/// `CommonLinks.SNAPSHOT_BUGS_FEEDBACK`, behind `PauseScreen.REPORT_BUGS`.
+const BUGS_LINK: &str = "https://aka.ms/snapshotbugs?ref=game";
+/// `CommonLinks.RELEASE_FEEDBACK` / `SNAPSHOT_FEEDBACK`, by `WorldVersion.stable()`.
+fn feedback_link() -> &'static str {
+    if horizon_core::version::STABLE {
+        "https://aka.ms/javafeedback?ref=game"
+    } else {
+        "https://aka.ms/snapshotfeedback?ref=game"
+    }
+}
+/// `PauseScreen.createPauseMenu`'s icon tooltips (`SpriteIconButton.withTootip`).
+const ICON_LABELS: [&str; 4] = [
+    "menu.reportBugs",
+    "menu.sendFeedback",
+    "gui.friends.open",
+    "menu.playerReporting",
+];
+/// Whether an icon button is active: `reportBugsButton.active =
+/// !dataVersion().isSideSeries()` (26.3 is the `main` series), the feedback
+/// button always, friends when the friends list is shown.
+fn icon_active(icon: usize, friends: bool) -> bool {
+    match icon {
+        0 | 1 => true,
+        FRIENDS_ICON => friends,
+        _ => false,
+    }
+}
 fn pause_icons(w: f32, h: f32, links: bool, split: bool) -> Vec<(f32, f32, &'static str)> {
     let x0 = ((w - 212.0) * 0.5).floor() + 60.0 - if split { 12.0 } else { 0.0 };
     let y = ((h - 166.0 - if links { 24.0 } else { 0.0 }) * 0.25).floor() + 98.0;
@@ -186,7 +214,7 @@ impl Game<'_> {
             }
         }
         for (i, (x, y, sprite)) in pause_icons(w, h, links, split).into_iter().enumerate() {
-            let active = (i == FRIENDS_ICON && friends) || i == SPLIT_ICON;
+            let active = icon_active(i, friends) || i == SPLIT_ICON;
             let hover = ui::hovered(self.cursor, x, y, 20.0, 20.0);
             // The icon has no label: name it for controller focus and the
             // control socket's widget tree.
@@ -226,8 +254,12 @@ impl Game<'_> {
             } else {
                 batch.sprite_scaled(atlas, sprite, x + 3.0, y + 3.0, 15.0, 15.0, u32::MAX);
             }
-            if i == FRIENDS_ICON && hover {
-                tooltip = Some(Text::literal(horizon_client::friends_screen::TITLE));
+            if hover && i < ICON_LABELS.len() {
+                tooltip = Some(if i == FRIENDS_ICON {
+                    Text::literal(horizon_client::friends_screen::TITLE)
+                } else {
+                    Text::translate(ICON_LABELS[i], &[])
+                });
             }
             if i == SPLIT_ICON && hover {
                 tooltip = Some(Text::literal(split_label));
@@ -262,6 +294,12 @@ impl Game<'_> {
             .find(|b| b.5 && ui::hovered(self.cursor, b.0, b.1, b.2, 20.0))
             .map(|b| b.4)
             .or_else(|| {
+                // The report bugs and feedback icons (ids 12 and 13).
+                (0..2)
+                    .find(|&i| ui::hovered(self.cursor, icons[i].0, icons[i].1, 20.0, 20.0))
+                    .map(|i| 12 + i as u8)
+            })
+            .or_else(|| {
                 (self.friends_view().shown
                     && ui::hovered(self.cursor, friends.0, friends.1, 20.0, 20.0))
                 .then_some(10)
@@ -291,6 +329,9 @@ impl Game<'_> {
                 self.screen = Screen::Playing;
                 self.capture(true);
             }
+            // ConfirmLinkScreen.confirmLink(this, CommonLinks...) on the pause screen.
+            Some(12) => self.confirm_trusted_link(BUGS_LINK, Screen::Paused),
+            Some(13) => self.confirm_trusted_link(feedback_link(), Screen::Paused),
             Some(2) => self.close_world()?,
             _ => {}
         }
@@ -547,6 +588,7 @@ mod tests {
             Screen::Inventory,
             Screen::Dead,
             Screen::CommandBlock,
+            Screen::BlockEditor,
             Screen::Win,
         ] {
             assert!(!screen.blurs_background(true));
@@ -588,6 +630,15 @@ mod tests {
                 assert!(button.1 >= split[0].1 + 20.0);
             }
         }
+    }
+    #[test]
+    fn pause_icons_report_bugs_and_feedback_are_active_like_vanilla() {
+        use super::{FRIENDS_ICON, icon_active};
+        // PauseScreen.createPauseMenu: the bug and feedback buttons are live,
+        // friends follows its list, player reporting waits for its screen.
+        assert!(icon_active(0, false) && icon_active(1, false));
+        assert!(icon_active(FRIENDS_ICON, true) && !icon_active(FRIENDS_ICON, false));
+        assert!(!icon_active(3, true));
     }
 
     #[test]

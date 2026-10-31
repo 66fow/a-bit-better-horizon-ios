@@ -31,6 +31,7 @@ horizon-friends = { path = "../horizon-friends" }
 horizon-mods = { path = "../horizon-mods", default-features = false }
 horizon-telemetry = { path = "../horizon-telemetry", default-features = false, features = ["live"] }
 horizon-bench = { path = "../horizon-bench" }
+horizon-anticheat = { path = "../horizon-anticheat" }
 horizon-gamecontroller = { path = "../horizon-gamecontroller" }
 horizon-airplay = { path = "../horizon-airplay" }
 horizon-ios-launcher = { path = "../horizon-ios-launcher" }
@@ -44,6 +45,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["raw_value"] }
 log = "0.4"
 chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "time", "process", "fs"] }
 
 [features]
 default = ["audio"]

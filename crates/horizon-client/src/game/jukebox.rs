@@ -141,7 +141,7 @@ impl Game<'_> {
     /// `LevelRenderer.playJukeboxSong`: client playback without rebroadcast.
     pub(super) fn play_song(&mut self, pos: [i32; 3], song: &str) {
         self.silence_song(pos);
-        let Some(s) = self.res.items().songs.get(song).cloned() else {
+        let Some(s) = self.items().songs.get(song).cloned() else {
             return;
         };
         let id = self.audio.play_jukebox_song(&s.sound, pos);
@@ -224,7 +224,7 @@ impl Game<'_> {
     pub(super) fn tick_jukebox(&mut self, key: (i32, i32, i32)) {
         let playing = match self.world.block_entities.get(&key) {
             Some(BlockEntity::Jukebox(j)) if j.playing => j.record.as_ref().and_then(|r| {
-                let song = self.res.items().get(&r.item)?.jukebox_song.clone()?;
+                let song = self.items().get(&r.item)?.jukebox_song.clone()?;
                 Some((song, j.ticks))
             }),
             _ => None,
@@ -233,7 +233,7 @@ impl Game<'_> {
             return;
         };
         let pos = [key.0, key.1, key.2];
-        let Some(s) = self.res.items().songs.get(&song).cloned() else {
+        let Some(s) = self.items().songs.get(&song).cloned() else {
             return;
         };
         if s.finished(ticks) {

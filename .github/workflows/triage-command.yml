@@ -12,10 +12,12 @@ on:
     types: [created]
 permissions:
   contents: read
+# Desktop release and governance automation belongs to the upstream repository.
 jobs:
   command:
     # Every other comment skips here, before a runner starts.
     if: >-
+      github.repository == 'horizon-rust/horizon' &&
       github.event.comment.user.type != 'Bot' && (
       startsWith(github.event.comment.body, '/close') ||
       startsWith(github.event.comment.body, '/reopen') ||

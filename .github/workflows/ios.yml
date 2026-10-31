@@ -6,6 +6,8 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  pull_request:
+    branches: [main]
 permissions:
   contents: read
 concurrency:
@@ -26,7 +28,7 @@ jobs:
   ipa:
     # The native launcher uses the iOS 26 SDK (Liquid Glass). macos-15 defaults to Xcode 16.4.
     # MAC_RUNNER remains available for a maintainer-provided runner with Xcode 26 or newer.
-    runs-on: ${{ vars.MAC_RUNNER || 'macos-26' }}
+    runs-on: ${{ github.event_name == 'pull_request' && 'macos-26' || vars.MAC_RUNNER || 'macos-26' }}
     timeout-minutes: 90
     defaults:
       run:
@@ -84,6 +86,14 @@ jobs:
           path: xcode-game-build.log
           retention-days: 7
           if-no-files-found: ignore
+      - name: Check the distributable contains no prepared assets
+        run: |
+          python3 - <<'PYASSETS'
+          import zipfile
+          with zipfile.ZipFile('Horizon-game-unsigned.ipa') as ipa:
+              if any('horizon-resources.json' in name for name in ipa.namelist()):
+                  raise SystemExit('::error::the .ipa carries prepared vanilla assets; refusing to publish it')
+          PYASSETS
       - uses: actions/upload-artifact@v4
         with:
           name: horizon-ios-game
@@ -91,28 +101,30 @@ jobs:
           retention-days: 7
           if-no-files-found: error
       - name: Send the .ipa to Discord
-        if: env.DISCORD_IPA_WEBHOOK != ''
+        # Delivery is optional: the IPA is already available in the run's artifacts.
+        continue-on-error: true
+        if: github.event_name != 'pull_request' && env.DISCORD_IPA_WEBHOOK != ''
         env:
           DISCORD_IPA_WEBHOOK: ${{ secrets.DISCORD_IPA_WEBHOOK }}
         run: |
           set -uo pipefail
-          # Never post Mojang's files: a bundle with prepared resources in it carries this marker.
-          if unzip -l Horizon-game-unsigned.ipa | grep -q horizon-resources.json; then
-            echo "::error::the .ipa carries prepared vanilla assets; refusing to post it"
-            exit 1
-          fi
           content=$(printf '%s\n' \
             "**Horizon for iPhone and iPad, run #${GITHUB_RUN_NUMBER}**" \
             "\`${GITHUB_REF_NAME}@${GITHUB_SHA::7}\`: an unsigned .ipa, with no assets" \
             "🤖 Posted by \`.github/workflows/ios.yml\`, not by a person.")
           response=$(mktemp)
-          code=$(curl -sS -o "$response" -w '%{http_code}' -X POST "$DISCORD_IPA_WEBHOOK" \
-            -F "content=$content" -F "file=@Horizon-game-unsigned.ipa;type=application/octet-stream")
+          trap 'rm -f "$response"' EXIT
+          if ! code=$(curl --connect-timeout 15 --max-time 120 -sS -o "$response" -w '%{http_code}' -X POST "$DISCORD_IPA_WEBHOOK" \
+            -F "content=$content" -F "file=@Horizon-game-unsigned.ipa;type=application/octet-stream"); then
+            echo "::warning::Could not reach Discord. The IPA is available in this run's artifacts."
+            exit 0
+          fi
           case "$code" in
             2*) echo "Posted the .ipa to Discord (HTTP $code)." ;;
+            404)
+              echo "::warning::Discord webhook no longer exists (HTTP 404). Replace the DISCORD_IPA_WEBHOOK repository secret. Download the IPA from this run's artifacts."
+              ;;
             *)
-              echo "::error::Discord refused the file (HTTP $code)"
-              sed -E 's/[A-Za-z0-9_-]{16,}/***masked***/g' "$response" | head -c 400
-              exit 1
+              echo "::warning::Discord delivery failed (HTTP $code). The IPA is available in this run's artifacts."
               ;;
           esac

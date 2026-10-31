@@ -68,7 +68,11 @@ impl NativeWorldCreation {
                 hardcore,
                 difficulty: if hardcore { 3 } else { difficulty },
                 commands: Some(!hardcore && self.commands),
-                flat: self.flat,
+                world_type: if self.flat {
+                    horizon_client::save::WorldPreset::Flat
+                } else {
+                    horizon_client::save::WorldPreset::Normal
+                },
                 structures: self.structures,
                 bonus_chest: !hardcore && self.bonus_chest,
                 ..Default::default()
@@ -102,6 +106,7 @@ pub(super) fn file_command(
                             "last_played": w.modified.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64),
                             "commands": w.commands,
                             "version": w.version,
+                            "corrupted": w.corrupted,
                         })
                     })
                     .collect();
@@ -313,7 +318,12 @@ mod native_creation_tests {
     fn native_creation_carries_all_generation_choices() {
         let v: NativeWorldCreation = serde_json::from_str(r#"{"name":"A world with spaces","seed":"hello world","mode":"creative","difficulty":"easy","commands":true,"flat":true,"structures":false,"bonus_chest":true}"#).unwrap();
         let (creative, o) = v.options().unwrap();
-        assert!(creative && o.commands == Some(true) && o.flat && o.bonus_chest);
+        assert!(
+            creative
+                && o.commands == Some(true)
+                && o.world_type == horizon_client::save::WorldPreset::Flat
+                && o.bonus_chest
+        );
         assert!(!o.structures && !o.hardcore);
         assert_eq!(o.difficulty, 1);
         assert_eq!(v.name, "A world with spaces");
@@ -351,7 +361,9 @@ mod native_creation_tests {
             .is_err()
         );
         let (_, o) = NativeWorldCreation::default().options().unwrap();
-        assert!(o.structures && !o.flat && !o.hardcore);
+        assert!(
+            o.structures && o.world_type != horizon_client::save::WorldPreset::Flat && !o.hardcore
+        );
         assert_eq!(o.difficulty, 2);
         assert!(serde_json::from_str::<NativeWorldCreation>(r#"{"unsupported":true}"#).is_err());
     }

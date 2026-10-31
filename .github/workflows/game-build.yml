@@ -34,8 +34,10 @@ on:
         default: true
 permissions:
   contents: read
+# Desktop release and governance automation belongs to the upstream repository.
 jobs:
   exporters:
+    if: github.repository == 'horizon-rust/horizon'
     # This runner holds the maintainer's own pinned Minecraft jars. Only our classes leave it. An untrusted build
     # goes to the Mac mini's nightly runner (macOS + horizon-nightly: ludovics-mac-mini-nightly, beside the one that
     # runs pull requests' parity jobs, so a nightly never waits behind their queue), never the release runner
@@ -80,6 +82,7 @@ jobs:
           retention-days: 3
 
   build:
+    if: github.repository == 'horizon-rust/horizon'
     needs: exporters
     name: build ${{ matrix.name }}
     strategy:
@@ -140,9 +143,11 @@ jobs:
       - name: Build the client, horizon-ctl, horizon-prepare and horizon-server
         run: cargo build --release --locked -p horizon-client --bin horizon-client --bin horizon-ctl -p horizon-prepare --bin horizon-prepare -p horizon-server --bin horizon-server
       - name: Every program the release folder takes was built
+        env:
+          EXE: ${{ matrix.exe }}
         run: |
           for binary in horizon-client horizon-ctl horizon-prepare horizon-server; do
-            test -f "target/release/$binary${{ matrix.exe }}" || { echo "::error::target/release/$binary${{ matrix.exe }} is missing"; exit 1; }
+            test -f "target/release/$binary$EXE" || { echo "::error::target/release/$binary$EXE is missing"; exit 1; }
           done
       - name: The signing keychain, unlocked
         if: runner.os == 'macOS' && vars.MACOS_SIGN_IDENTITY != '' && inputs.developer_id

@@ -8,7 +8,7 @@ use crate::{
     items::Items,
     mobs::{
         Mob, MobType, MobTypes,
-        finalize::{self, Ctx, FinalizeLevel, Reason, SpawnData, SpawnRegistries},
+        finalize::{self, Ctx, FinalizeLevel, Group, Reason, SpawnData, SpawnRegistries},
         spawning::{LocalDifficulty, MOON_BRIGHTNESS},
     },
 };
@@ -44,10 +44,15 @@ fn load(root: &std::path::Path) -> Option<Data> {
     let camel_husk = (camel.width as f32, camel.height as f32);
     Some(Data {
         types: types.into_iter().map(|(k, t)| (k, Arc::new(t))).collect(),
-        biome_tags: crate::items::load_tags(root, "worldgen/biome").unwrap_or_default(),
+        biome_tags: crate::items::load_tags(
+            root,
+            "worldgen/biome",
+            &horizon_world::loot::PackOverlay::NONE,
+        )
+        .unwrap_or_default(),
         registries: SpawnRegistries::load(root),
         enchantments: Enchantments::load(root),
-        items: Items::tags_only(root).ok()?,
+        items: Items::tags_only(root, &horizon_world::loot::PackOverlay::NONE).ok()?,
         camel_husk,
     })
 }
@@ -59,6 +64,8 @@ pub struct StructureMobFinalizer {
     /// The level's difficulty (0 peaceful to 3 hard) and overworld clock.
     difficulty: AtomicU8,
     day_time: AtomicI64,
+    #[cfg(test)]
+    halloween_override: OnceLock<bool>,
 }
 impl StructureMobFinalizer {
     pub fn new(root: PathBuf, dimension: &str) -> Self {
@@ -68,6 +75,8 @@ impl StructureMobFinalizer {
             data: OnceLock::new(),
             difficulty: AtomicU8::new(2),
             day_time: AtomicI64::new(0),
+            #[cfg(test)]
+            halloween_override: OnceLock::new(),
         }
     }
     pub fn set_conditions(&self, difficulty: u8, day_time: i64) {
@@ -83,6 +92,7 @@ struct Level<'a> {
     difficulty: u8,
     day_time: i64,
     next_id: u32,
+    halloween: bool,
 }
 impl FinalizeLevel for Level<'_> {
     fn biome(&self, _: [i32; 3]) -> String {
@@ -116,8 +126,7 @@ impl FinalizeLevel for Level<'_> {
         self.day_time
     }
     fn halloween(&self) -> bool {
-        let today = chrono::Local::now();
-        (today.month(), today.day()) == (10, 31)
+        self.halloween
     }
     fn create(&mut self, kind: &str, _: Reason) -> Option<Mob> {
         if self.difficulty == 0 && !finalize::allowed_in_peaceful(kind) {
@@ -135,6 +144,8 @@ fn run<R: RandomSource>(
     difficulty: LocalDifficulty,
     data: &SpawnData<'_>,
     m: &mut Mob,
+    reason: Reason,
+    group: &mut Option<Group>,
 ) -> Vec<Mob> {
     let mut cx = Ctx {
         level,
@@ -142,8 +153,13 @@ fn run<R: RandomSource>(
         difficulty,
         data,
         created: Vec::new(),
+        jockey_rider: None,
     };
-    cx.finalize(m, Reason::Structure, None);
+    *group = cx.finalize(m, reason, group.take());
+    if let Some(rider) = cx.jockey_rider {
+        debug_assert_eq!(rider.id, m.id);
+        *m = rider;
+    }
     cx.created
 }
 
@@ -154,6 +170,18 @@ fn tree(mobs: &[(Mob, Option<Tag>)], i: usize, dimension: &str) -> Compound {
         return Compound::new();
     };
     c.remove(&"UUID".into());
+    // Keys in vanilla's templates that no entity reads: the chunk keeps the
+    // entity as its save writes it (ProtoChunk.addEntity), without them.
+    for key in [
+        "CatType",
+        "OwnerUUID",
+        "Riches",
+        "Willing",
+        "food_level",
+        "lastRestock",
+    ] {
+        c.remove(&key.into());
+    }
     entity_nbt::put_brain(&mut c, m, dimension);
     let riders: Vec<Tag> = (0..mobs.len())
         .filter(|&j| mobs[j].0.extra.mount == Some(m.id))
@@ -173,26 +201,94 @@ impl StructureMobs for StructureMobFinalizer {
         structures: &[String],
         random: &mut dyn PieceRandom,
     ) -> bool {
-        let Some(data) = self.data.get_or_init(|| {
-            let data = load(&self.root);
-            if data.is_none() {
-                log::error!("Horizon: no mob data, structure mobs are finalized when loaded");
-            }
-            data
-        }) else {
+        let Some(data) = self.data() else {
             return false;
         };
         let mut raw = Tag::Compound(nbt.clone());
         if let Tag::Compound(c) = &mut raw {
             c.remove(&"horizon:finalize".into());
         }
-        let Some(mut m) = entity_nbt::mob_from_nbt(&raw, &data.types, 1) else {
+        let Some(m) = entity_nbt::mob_from_nbt(&raw, &data.types, 1) else {
             // Not a mob: vanilla finalizes only Mob instances.
             return true;
         };
+        let reason = Reason::Structure;
+        match self.finish(
+            data,
+            m,
+            Some(raw),
+            biome,
+            structures,
+            random,
+            reason,
+            &mut None,
+        ) {
+            Some(saved) => {
+                *nbt = saved;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+impl StructureMobFinalizer {
+    fn data(&self) -> Option<&Data> {
+        self.data
+            .get_or_init(|| {
+                let data = load(&self.root);
+                if data.is_none() {
+                    log::error!("Horizon: no mob data, structure mobs are finalized when loaded");
+                }
+                data
+            })
+            .as_ref()
+    }
+    /// A mob chunk generation spawns (`spawnOriginalMobs`): a new one of
+    /// `kind` finalized as a structure mob is, as the chunk saves it; `group`
+    /// carries a pack's group data from one member to the next.
+    pub fn spawn_generated(
+        &self,
+        kind: &str,
+        position: Vec3,
+        yaw: f32,
+        biome: &str,
+        random: &mut dyn PieceRandom,
+        group: &mut Option<Group>,
+    ) -> Option<Compound> {
+        let data = self.data()?;
+        let m = Mob::new(1, data.types.get(kind)?.clone(), position, yaw);
+        let reason = Reason::ChunkGeneration;
+        self.finish(data, m, None, biome, &[], random, reason, group)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        &self,
+        data: &Data,
+        mut m: Mob,
+        raw: Option<Tag>,
+        biome: &str,
+        structures: &[String],
+        random: &mut dyn PieceRandom,
+        reason: Reason,
+        group: &mut Option<Group>,
+    ) -> Option<Compound> {
         let base = self.difficulty.load(Ordering::Relaxed);
         let day_time = self.day_time.load(Ordering::Relaxed);
+        let calendar = || {
+            let today = chrono::Local::now();
+            (today.month(), today.day()) == (10, 31)
+        };
+        #[cfg(test)]
+        let halloween = self
+            .halloween_override
+            .get()
+            .copied()
+            .unwrap_or_else(calendar);
+        #[cfg(not(test))]
+        let halloween = calendar();
         let mut level = Level {
+            halloween,
             data,
             biome,
             structures,
@@ -211,21 +307,20 @@ impl StructureMobs for StructureMobFinalizer {
         };
         let any = random.as_any();
         let created = if let Some(r) = any.downcast_mut::<LegacyRandom>() {
-            run(&mut level, r, difficulty, &spawn, &mut m)
+            run(&mut level, r, difficulty, &spawn, &mut m, reason, group)
         } else if let Some(r) = any.downcast_mut::<XoroshiroRandom>() {
-            run(&mut level, r, difficulty, &spawn, &mut m)
+            run(&mut level, r, difficulty, &spawn, &mut m, reason, group)
         } else {
             log::error!("Horizon: unknown region random, structure mobs are finalized when loaded");
-            return false;
+            return None;
         };
-        let mut mobs = vec![(m, Some(raw))];
+        let mut mobs = vec![(m, raw)];
         mobs.extend(created.into_iter().map(|c| (c, None)));
         let root = mobs
             .iter()
             .position(|(m, _)| m.extra.mount.is_none())
             .unwrap_or(0);
-        *nbt = tree(&mobs, root, &self.dimension);
-        true
+        Some(tree(&mobs, root, &self.dimension))
     }
 }
 
@@ -379,6 +474,13 @@ mod tests {
             dimension,
         )
         .unwrap();
+        // The reference captures were made outside Halloween. Fix the fixture's
+        // calendar, not the process environment, so parallel tests stay independent.
+        terrain
+            .structure_mobs
+            .halloween_override
+            .set(false)
+            .unwrap();
         let mut worker = terrain.worker();
         let mut region: [Proto; 9] = std::array::from_fn(|i| {
             terrain.proto(&mut worker, x + i as i32 % 3 - 1, z + i as i32 / 3 - 1)
