@@ -800,6 +800,11 @@ pub enum Opt {
     TouchScale,
     /// Whether a button of the touch overlay is shown.
     TouchShow(crate::touch::Control),
+    /// The D-pad, or the analog stick that replaces it.
+    TouchStick,
+    /// The analog stick's own size and opacity.
+    TouchStickScale,
+    TouchStickOpacity,
     /// `options.modelPart.*`: one skin layer (index into `options_file::MODEL_PARTS`).
     ModelPart(usize),
     MainHand,

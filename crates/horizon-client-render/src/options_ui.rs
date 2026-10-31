@@ -302,6 +302,9 @@ impl Opt {
             Opt::TouchOpacity => "horizon.options.touch_opacity",
             Opt::TouchScale => "horizon.options.touch_scale",
             Opt::TouchShow(control) => crate::touch::control_caption(control),
+            Opt::TouchStick => "horizon.options.touch_movement",
+            Opt::TouchStickScale => "horizon.options.touch_stick_size",
+            Opt::TouchStickOpacity => "horizon.options.touch_stick_opacity",
             Opt::ModelPart(i) => [
                 "options.modelPart.cape",
                 "options.modelPart.jacket",
@@ -381,6 +384,12 @@ impl Opt {
                 crate::touch::MIN_SCALE,
                 crate::touch::MAX_SCALE,
             ),
+            Opt::TouchStickScale => unit(
+                s.touch.stick_scale,
+                crate::touch::MIN_SCALE,
+                crate::touch::MAX_SCALE,
+            ),
+            Opt::TouchStickOpacity => unit(s.touch.stick_opacity, crate::touch::MIN_OPACITY, 1.0),
             Opt::SprintWindow => unit(s.sprint_window as f32, 0.0, 10.0),
             _ => Kind::Cycle,
         }
@@ -602,6 +611,13 @@ impl Opt {
             Opt::TouchOpacity => percent(c, s.touch.opacity),
             Opt::TouchScale => percent(c, s.touch.scale),
             Opt::TouchShow(control) => on_off(s.touch.visible(control)),
+            Opt::TouchStick => tr(if s.touch.movement == crate::touch::Movement::Stick {
+                "horizon.options.touch_movement.stick"
+            } else {
+                "horizon.options.touch_movement.dpad"
+            }),
+            Opt::TouchStickScale => percent(c, s.touch.stick_scale),
+            Opt::TouchStickOpacity => percent(c, s.touch.stick_opacity),
             _ => generic(c, self.value_text(s)),
         }
     }
@@ -842,6 +858,8 @@ impl Opt {
             Opt::PadLookDeadzone => s.controller.look_deadzone = step(0.0, 50.0) / 100.0,
             Opt::TouchOpacity => s.touch.opacity = step(20.0, 100.0) / 100.0,
             Opt::TouchScale => s.touch.scale = step(75.0, 150.0) / 100.0,
+            Opt::TouchStickScale => s.touch.stick_scale = step(75.0, 150.0) / 100.0,
+            Opt::TouchStickOpacity => s.touch.stick_opacity = step(20.0, 100.0) / 100.0,
             Opt::SprintWindow => s.sprint_window = step(0.0, 10.0) as i32,
             _ => {}
         }
@@ -1072,6 +1090,12 @@ impl Opt {
             Opt::TouchShow(control) => {
                 let shown = s.touch.visible(control);
                 s.touch.set_hidden(control, shown);
+            }
+            Opt::TouchStick => {
+                s.touch.movement = match s.touch.movement {
+                    crate::touch::Movement::DPad => crate::touch::Movement::Stick,
+                    crate::touch::Movement::Stick => crate::touch::Movement::DPad,
+                };
             }
             _ => {}
         }
@@ -2087,13 +2111,30 @@ impl OptionsUi {
                         Act::TouchReset,
                     )),
                 ));
+                rows.push(Row::Big(Opt::TouchStick));
                 rows.push(Row::Big(Opt::TouchOpacity));
                 rows.push(Row::Big(Opt::TouchScale));
+                let stick = s.touch.movement == crate::touch::Movement::Stick;
+                if stick {
+                    rows.push(Row::Big(Opt::TouchStickScale));
+                    rows.push(Row::Big(Opt::TouchStickOpacity));
+                }
                 rows.push(Row::Header("Buttons"));
-                // The pause button stays: without it a phone has no way back to its menus.
+                // The pause button stays: without it a phone has no way back to its menus. The stick
+                // replaces the D-pad's directions, so they have no switches of their own in its mode.
                 let shown: Vec<Opt> = crate::touch::CONTROLS
                     .into_iter()
                     .filter(|c| *c != crate::touch::Control::Pause)
+                    .filter(|c| {
+                        !stick
+                            || !matches!(
+                                c,
+                                crate::touch::Control::Forward
+                                    | crate::touch::Control::Back
+                                    | crate::touch::Control::Left
+                                    | crate::touch::Control::Right
+                            )
+                    })
                     .map(Opt::TouchShow)
                     .collect();
                 rows.extend(pairs(&shown));
@@ -3156,7 +3197,16 @@ impl OptionsUi {
                         .as_ref()
                         .is_some_and(|(c, _)| c == control);
                     let rect = [wd.x, wd.y, wd.w, wd.h];
-                    if let crate::touch::Control::Custom(id) = control {
+                    if *control == crate::touch::Control::Stick {
+                        crate::touch_draw::draw_stick(
+                            batch,
+                            atlas,
+                            rect,
+                            [0.0, 0.0],
+                            held,
+                            s.touch.opacity * s.touch.stick_opacity,
+                        );
+                    } else if let crate::touch::Control::Custom(id) = control {
                         let own = s.touch.button(*id).map_or(1.0, |b| b.opacity);
                         crate::touch_draw::draw_custom(
                             batch,
@@ -4583,6 +4633,217 @@ mod tests {
             crate::touch::MIN_OPACITY
         );
         ui.release();
+    }
+
+    #[test]
+    fn the_movement_option_switches_between_the_dpad_and_the_stick() {
+        use crate::touch::{Control, Movement};
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::Touch);
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let movement = widgets
+            .iter()
+            .find(|w| {
+                matches!(
+                    w.kind,
+                    WKind::Button {
+                        act: Act::Cycle(Opt::TouchStick),
+                        ..
+                    }
+                )
+            })
+            .expect("the touch page switches the movement");
+        let dpad = tr("horizon.options.touch_movement.dpad").plain().to_owned();
+        assert!(Opt::TouchStick.label(&s).plain().contains(&dpad));
+        assert!(!widgets.iter().any(|w| matches!(
+            w.kind,
+            WKind::Slider {
+                opt: Opt::TouchStickScale,
+                ..
+            }
+        )));
+        assert!(widgets.iter().any(|w| matches!(
+            w.kind,
+            WKind::Button {
+                act: Act::Cycle(Opt::TouchShow(Control::Forward)),
+                ..
+            }
+        )));
+        assert_eq!(
+            ui.click(
+                &mut s,
+                &atlas,
+                movement.x + 2.0,
+                movement.y + 2.0,
+                size,
+                [480, 480],
+                false,
+                false
+            ),
+            vec![Event::ButtonClick, Event::Changed]
+        );
+        ui.release();
+        assert_eq!(s.touch.movement, Movement::Stick);
+        let stick = tr("horizon.options.touch_movement.stick")
+            .plain()
+            .to_owned();
+        assert!(Opt::TouchStick.label(&s).plain().contains(&stick));
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        for opt in [Opt::TouchStickScale, Opt::TouchStickOpacity] {
+            assert!(
+                widgets
+                    .iter()
+                    .any(|w| matches!(w.kind, WKind::Slider { opt: o, .. } if o == opt)),
+                "{opt:?} has a slider in stick mode"
+            );
+        }
+        // The stick replaces the D-pad's directions, so their switches are gone.
+        for control in [
+            Control::Forward,
+            Control::Back,
+            Control::Left,
+            Control::Right,
+        ] {
+            assert!(!widgets.iter().any(|w| matches!(
+                w.kind,
+                WKind::Button {
+                    act: Act::Cycle(Opt::TouchShow(c)),
+                    ..
+                } if c == control
+            )));
+        }
+        // And back to the D-pad.
+        let movement = widgets
+            .iter()
+            .find(|w| {
+                matches!(
+                    w.kind,
+                    WKind::Button {
+                        act: Act::Cycle(Opt::TouchStick),
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        ui.click(
+            &mut s,
+            &atlas,
+            movement.x + 2.0,
+            movement.y + 2.0,
+            size,
+            [480, 480],
+            false,
+            false,
+        );
+        assert_eq!(s.touch.movement, Movement::DPad);
+    }
+
+    #[test]
+    fn the_sticks_sliders_change_its_size_and_opacity() {
+        use crate::touch::Movement;
+        let atlas = atlas();
+        let mut s = Settings::default();
+        s.touch.movement = Movement::Stick;
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::Touch);
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let scale = widgets
+            .iter()
+            .find(|w| {
+                matches!(
+                    w.kind,
+                    WKind::Slider {
+                        opt: Opt::TouchStickScale,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        ui.click(
+            &mut s,
+            &atlas,
+            scale.x + 2.0,
+            scale.y + 4.0,
+            size,
+            [480, 480],
+            false,
+            false,
+        );
+        assert_eq!(s.touch.stick_scale, crate::touch::MIN_SCALE);
+        assert!(ui.release().contains(&Event::Changed));
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let opacity = widgets
+            .iter()
+            .find(|w| {
+                matches!(
+                    w.kind,
+                    WKind::Slider {
+                        opt: Opt::TouchStickOpacity,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        ui.click(
+            &mut s,
+            &atlas,
+            opacity.x + 2.0,
+            opacity.y + 4.0,
+            size,
+            [480, 480],
+            false,
+            false,
+        );
+        assert_eq!(s.touch.stick_opacity, crate::touch::MIN_OPACITY);
+        ui.release();
+    }
+
+    #[test]
+    fn the_editor_drags_the_stick_which_takes_the_dpads_place() {
+        use crate::touch::{Control, Movement};
+        let atlas = atlas();
+        let mut s = Settings::default();
+        s.touch.movement = Movement::Stick;
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::TouchLayout);
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let rect_of = |control: Control| {
+            let wd = widgets
+                .iter()
+                .find(|w| matches!(w.kind, WKind::TouchControl(c) if c == control))
+                .unwrap_or_else(|| panic!("the editor draws {control:?}"));
+            (wd.x, wd.y, wd.w, wd.h)
+        };
+        for control in [
+            Control::Forward,
+            Control::Back,
+            Control::Left,
+            Control::Right,
+        ] {
+            assert!(!widgets
+                .iter()
+                .any(|w| matches!(w.kind, WKind::TouchControl(c) if c == control)));
+        }
+        let (sx, sy, sw, sh) = rect_of(Control::Stick);
+        let sneak = rect_of(Control::Sneak);
+        let jump = rect_of(Control::Jump);
+        // Sneak sits one 8 px gap to the left of jump, on the same row.
+        assert!((sneak.0 + sneak.2 + 8.0 - jump.0).abs() < 0.01);
+        assert!((sneak.1 - jump.1).abs() < 0.01);
+        // The stick is a wide target: the drag moves it like any other control.
+        let (px, py) = (sx + sw / 2.0, sy + sh / 2.0);
+        assert_eq!(
+            ui.click(&mut s, &atlas, px, py, size, [480, 480], false, false),
+            vec![Event::ButtonClick]
+        );
+        ui.click(&mut s, &atlas, 20.0, 20.0, size, [480, 480], true, false);
+        assert_eq!(ui.release(), vec![Event::Changed]);
+        assert!(s.touch.placements.contains_key(&Control::Stick));
     }
 
     fn atlas() -> HudAtlas {

@@ -40,6 +40,90 @@ pub fn draw_custom(
     );
 }
 
+/// The analog stick: a dark disc, a light ring, and a thumb that follows the finger. `analog` is the
+/// stick's `[left, forward]`, each -1..=1; the thumb sits towards the direction it moves the player.
+pub fn draw_stick(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    r: Rect,
+    analog: [f32; 2],
+    held: bool,
+    opacity: f32,
+) {
+    let (cx, cy) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    let radius = r[2].min(r[3]) / 2.0;
+    if radius <= 0.0 {
+        return;
+    }
+    let alpha = (if held { 150.0 } else { 110.0 }) * opacity.clamp(0.0, 1.0);
+    disc(batch, atlas, (cx, cy), radius * 0.94, rgba(24, 24, 24, (alpha * 0.55) as u8));
+    ring(
+        batch,
+        atlas,
+        (cx, cy),
+        radius * 0.86,
+        radius,
+        rgba(230, 230, 230, alpha as u8),
+    );
+    let thumb = radius * 0.32;
+    let (ax, ay) = (-analog[0], -analog[1]);
+    let len = ax.hypot(ay);
+    let (dx, dy) = if len > 1.0 {
+        (ax / len, ay / len)
+    } else {
+        (ax, ay)
+    };
+    let reach = radius - thumb;
+    disc(
+        batch,
+        atlas,
+        (cx + dx * reach, cy + dy * reach),
+        thumb,
+        rgba(245, 245, 245, alpha as u8),
+    );
+}
+
+/// How many quads make the stick's circles; 32 reads as round at any button size.
+const STICK_SEGMENTS: usize = 32;
+
+fn on_circle(centre: (f32, f32), radius: f32, i: usize) -> (f32, f32) {
+    let a = (i % STICK_SEGMENTS) as f32 / STICK_SEGMENTS as f32 * std::f32::consts::TAU;
+    (centre.0 + radius * a.cos(), centre.1 + radius * a.sin())
+}
+
+fn disc(batch: &mut HudBatch, atlas: &HudAtlas, centre: (f32, f32), radius: f32, color: u32) {
+    for i in 0..STICK_SEGMENTS {
+        let (x0, y0) = on_circle(centre, radius, i);
+        let (x1, y1) = on_circle(centre, radius, i + 1);
+        batch.fill_quad(
+            atlas,
+            [[centre.0, centre.1], [x0, y0], [x1, y1], [x0, y0]],
+            color,
+        );
+    }
+}
+
+fn ring(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    centre: (f32, f32),
+    inner: f32,
+    outer: f32,
+    color: u32,
+) {
+    for i in 0..STICK_SEGMENTS {
+        let (ix0, iy0) = on_circle(centre, inner, i);
+        let (ix1, iy1) = on_circle(centre, inner, i + 1);
+        let (ox0, oy0) = on_circle(centre, outer, i);
+        let (ox1, oy1) = on_circle(centre, outer, i + 1);
+        batch.fill_quad(
+            atlas,
+            [[ix0, iy0], [ox0, oy0], [ox1, oy1], [ix1, iy1]],
+            color,
+        );
+    }
+}
+
 /// Vanilla's button sprite, nine-sliced to the touch button's size: highlighted while held, and see-through
 /// enough to keep the world behind it in sight.
 pub fn draw_button(batch: &mut HudBatch, atlas: &HudAtlas, r: Rect, held: bool, opacity: f32) {
@@ -136,6 +220,6 @@ fn glyph(batch: &mut HudBatch, atlas: &HudAtlas, control: Control, r: Rect, colo
                 cell(batch, x, -0.5, 1.0, 1.0);
             }
         }
-        Control::Hotbar(_) | Control::Custom(_) => {}
+        Control::Hotbar(_) | Control::Custom(_) | Control::Stick => {}
     }
 }

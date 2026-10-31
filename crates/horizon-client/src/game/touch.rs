@@ -41,6 +41,8 @@ pub(super) struct TouchInput {
     /// The key or mouse button each custom button sent while it is held, so its release sends the same
     /// one even if the mapping changed meanwhile.
     custom_keys: BTreeMap<u16, CustomKey>,
+    /// The analog stick's `[left, forward]` while a finger holds it.
+    analog: Option<[f32; 2]>,
     clock: Option<Instant>,
 }
 
@@ -78,7 +80,7 @@ fn key_of(control: Control) -> Option<KeyCode> {
         Control::Chat => KeyCode::KeyT,
         Control::Pause => KeyCode::Escape,
         Control::Inventory => KeyCode::KeyE,
-        Control::Sneak | Control::Hotbar(_) | Control::Custom(_) => return None,
+        Control::Sneak | Control::Hotbar(_) | Control::Custom(_) | Control::Stick => return None,
     })
 }
 
@@ -314,6 +316,10 @@ impl Game<'_> {
                         }
                     }
                 }
+                Out::Move(left, forward) => {
+                    self.touch.analog =
+                        (left.hypot(forward) > 1e-4).then_some([left, forward]);
+                }
                 Out::Look(dx, dy) => {
                     self.touch_grab();
                     let (dx, dy) = (f64::from(dx * scale), f64::from(dy * scale));
@@ -351,6 +357,11 @@ impl Game<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The analog stick's `[left, forward]`, `None` while no finger holds it.
+    pub(super) fn touch_move(&self) -> Option<[f32; 2]> {
+        self.touch.analog
     }
 
     /// A player's button: its mapped key or mouse button, pressed and released as hardware would.
@@ -639,6 +650,17 @@ impl Game<'_> {
                 );
                 continue;
             }
+            if control == Control::Stick {
+                touch_draw::draw_stick(
+                    batch,
+                    atlas,
+                    r,
+                    self.touch.analog.unwrap_or([0.0, 0.0]),
+                    self.touch.fingers.held(control),
+                    opacity * self.settings.touch.stick_opacity,
+                );
+                continue;
+            }
             touch_draw::draw_control(
                 batch,
                 atlas,
@@ -721,6 +743,7 @@ impl Game<'_> {
                     Control::Inventory => "•••".to_owned(),
                     Control::Hotbar(slot) => (slot + 1).to_string(),
                     Control::Custom(id) => self.settings.touch.button_label(id),
+                    Control::Stick => "Stick".to_owned(),
                 };
                 buttons.push(horizon_airplay::Button {
                     label,

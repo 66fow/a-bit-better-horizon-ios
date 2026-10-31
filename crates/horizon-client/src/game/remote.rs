@@ -5016,7 +5016,7 @@ impl Game<'_> {
             }
             return Ok(());
         }
-        let stick = self.pad_move();
+        let stick = self.pad_move().or_else(|| self.touch_move());
         if self.player.is_none() {
             return Ok(());
         }

@@ -6253,7 +6253,7 @@ impl Game<'_> {
         self.native_tick();
         self.tell_native_now();
         let camera_eye = self.camera_eye_height();
-        let stick = self.pad_move();
+        let stick = self.pad_move().or_else(|| self.touch_move());
         if self.riding.is_some() && self.player.is_some() {
             let playing = self.screen == Screen::Playing;
             let held = |k| playing && self.keys.contains(&k);

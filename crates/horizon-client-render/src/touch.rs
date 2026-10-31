@@ -1,7 +1,7 @@
-//! Touch controls for phones and tablets (Horizon's own), after Minecraft: Pocket Edition's: a D-pad on the
-//! left with sneak in its centre, jump on the right, perspective, chat and pause at the top, and the hotbar
-//! and an inventory button along the bottom. A finger anywhere else turns the view; a short tap uses (or
-//! attacks the entity under the crosshair), and holding still mines.
+//! Touch controls for phones and tablets (Horizon's own), after Minecraft: Pocket Edition's: a D-pad (or an
+//! analog stick) on the left, jump on the right, perspective, chat and pause at the top, and the hotbar and
+//! an inventory button along the bottom. A finger anywhere else turns the view; a short tap uses (or attacks
+//! the entity under the crosshair), and holding still mines.
 //!
 //! This module is the layout and the fingers' state: positions in GUI pixels in, [`Out`]s for the game to act
 //! on out. game/touch.rs feeds it winit's touches and acts on what comes back.
@@ -31,6 +31,8 @@ pub enum Control {
     Hotbar(u8),
     /// A button the player added, by its id in [`TouchSettings::buttons`].
     Custom(u16),
+    /// The analog stick that replaces the D-pad: a finger on it moves at its own angle and speed.
+    Stick,
 }
 
 impl Control {
@@ -41,6 +43,16 @@ impl Control {
             Control::Forward | Control::Back | Control::Left | Control::Right
         )
     }
+}
+
+/// How the left thumb moves the player.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Movement {
+    /// Four directions slid between: the D-pad.
+    #[default]
+    DPad,
+    /// An analog stick: any direction, any speed up to full.
+    Stick,
 }
 
 /// `[x, y, width, height]` in GUI pixels.
@@ -186,6 +198,7 @@ pub fn control_name(control: Control) -> Option<&'static str> {
         Control::Chat => "chat",
         Control::Pause => "pause",
         Control::Inventory => "inventory",
+        Control::Stick => "stick",
         Control::Hotbar(_) | Control::Custom(_) => return None,
     })
 }
@@ -202,6 +215,7 @@ pub fn control_from_name(name: &str) -> Option<Control> {
         "chat" => Control::Chat,
         "pause" => Control::Pause,
         "inventory" => Control::Inventory,
+        "stick" => Control::Stick,
         _ => return None,
     })
 }
@@ -221,6 +235,7 @@ pub fn control_caption(control: Control) -> &'static str {
         Control::Inventory => "horizon.options.touch.inventory",
         Control::Hotbar(_) => "horizon.options.touch.hotbar",
         Control::Custom(_) => "horizon.options.touch.custom",
+        Control::Stick => "horizon.options.touch.stick",
     }
 }
 
@@ -237,6 +252,12 @@ pub struct TouchSettings {
     pub hidden: BTreeSet<Control>,
     /// The player's own buttons, by id.
     pub buttons: BTreeMap<u16, CustomButton>,
+    /// The D-pad, or the analog stick in its place.
+    pub movement: Movement,
+    /// The stick's own size, `MIN_SCALE`..=`MAX_SCALE`, multiplied by the overlay's scale.
+    pub stick_scale: f32,
+    /// The stick's own opacity, `MIN_OPACITY`..=1.0, multiplied by the overlay's.
+    pub stick_opacity: f32,
 }
 
 impl Default for TouchSettings {
@@ -247,6 +268,9 @@ impl Default for TouchSettings {
             placements: BTreeMap::new(),
             hidden: BTreeSet::new(),
             buttons: BTreeMap::new(),
+            movement: Movement::DPad,
+            stick_scale: 1.0,
+            stick_opacity: 1.0,
         }
     }
 }
@@ -284,6 +308,19 @@ impl TouchSettings {
             match key {
                 "opacity" => s.opacity = clamp_unit(value, s.opacity, MIN_OPACITY, 1.0),
                 "scale" => s.scale = clamp_unit(value, s.scale, MIN_SCALE, MAX_SCALE),
+                "movement" => {
+                    if value == "stick" {
+                        s.movement = Movement::Stick;
+                    }
+                }
+                // `stick:<scale>:<opacity>`, as `serialize` writes it.
+                "stick" => {
+                    if let Some((scale, opacity)) = value.split_once(':') {
+                        s.stick_scale = clamp_unit(scale.trim(), s.stick_scale, MIN_SCALE, MAX_SCALE);
+                        s.stick_opacity =
+                            clamp_unit(opacity.trim(), s.stick_opacity, MIN_OPACITY, 1.0);
+                    }
+                }
                 "hidden" => {
                     if let Some(control) = control_from_name(value) {
                         s.set_hidden(control, true);
@@ -347,6 +384,12 @@ impl TouchSettings {
     }
     pub fn serialize(&self) -> String {
         let mut text = format!("opacity:{}\nscale:{}\n", self.opacity, self.scale);
+        if self.movement == Movement::Stick {
+            text.push_str("movement:stick\n");
+        }
+        if self.stick_scale != 1.0 || self.stick_opacity != 1.0 {
+            text.push_str(&format!("stick:{}:{}\n", self.stick_scale, self.stick_opacity));
+        }
         for (control, placement) in &self.placements {
             if let Some(name) = control_name(*control) {
                 text.push_str(&format!("place:{name}:{},{}\n", placement.x, placement.y));
@@ -373,12 +416,32 @@ impl TouchSettings {
     pub fn layout(&self, w: f32, h: f32) -> Vec<(Control, Rect)> {
         let scale = self.scale.clamp(MIN_SCALE, MAX_SCALE);
         let mut v = layout(w, h);
+        if self.movement == Movement::Stick {
+            // The stick takes the D-pad's 3×3 box, and sneak moves to the left of jump.
+            v.retain(|(control, _)| {
+                !matches!(
+                    control,
+                    Control::Forward | Control::Back | Control::Left | Control::Right
+                )
+            });
+            let s = button_size(h);
+            let (cx, cy) = (MARGIN + s, h - MARGIN - 2.0 * s - 8.0);
+            v.push((Control::Stick, [cx - s, cy - s, 3.0 * s, 3.0 * s]));
+            if let Some((_, sneak)) = v.iter_mut().find(|(c, _)| *c == Control::Sneak) {
+                *sneak = [w - MARGIN - 2.0 * s - 8.0, cy, s, s];
+            }
+        }
         v.retain(|(control, _)| self.visible(*control));
         for (control, r) in &mut v {
             if matches!(control, Control::Hotbar(_)) {
                 continue;
             }
-            let (bw, bh) = (r[2] * scale, r[3] * scale);
+            let own = if *control == Control::Stick {
+                self.stick_scale.clamp(MIN_SCALE, MAX_SCALE)
+            } else {
+                1.0
+            };
+            let (bw, bh) = (r[2] * scale * own, r[3] * scale * own);
             let (mut x, mut y) = (r[0] + (r[2] - bw) / 2.0, r[1] + (r[3] - bh) / 2.0);
             if let Some(placement) = self.placements.get(control) {
                 x = placement.x * w;
@@ -414,13 +477,13 @@ impl TouchSettings {
     pub fn visible(&self, control: Control) -> bool {
         matches!(
             control,
-            Control::Hotbar(_) | Control::Pause | Control::Custom(_)
+            Control::Hotbar(_) | Control::Pause | Control::Custom(_) | Control::Stick
         ) || !self.hidden.contains(&control)
     }
     pub fn set_hidden(&mut self, control: Control, hidden: bool) {
         if matches!(
             control,
-            Control::Hotbar(_) | Control::Pause | Control::Custom(_)
+            Control::Hotbar(_) | Control::Pause | Control::Custom(_) | Control::Stick
         ) {
             return;
         }
@@ -534,17 +597,44 @@ pub enum Out {
     /// A finger held still away from the buttons: mining starts, and stops when it lifts.
     MineStart,
     MineEnd,
+    /// The analog stick's position: `[left, forward]`, each -1..=1.
+    Move(f32, f32),
 }
 
 /// How far a finger moves (GUI pixels) before a touch is a drag and not a tap.
 const SLOP: f32 = 8.0;
 /// How long a finger stays still (seconds) before it mines.
 const HOLD: f64 = 0.35;
+/// How far from the stick's centre (as a share of its radius) a finger moves nothing.
+const STICK_DEADZONE: f32 = 0.15;
+
+/// The stick's `[left, forward]` for a finger at `at`: zero in the middle, full at the ring and beyond.
+fn stick_vector(r: Rect, at: (f32, f32)) -> (f32, f32) {
+    let radius = (r[2].min(r[3]) / 2.0).max(1.0);
+    let dx = (at.0 - (r[0] + r[2] / 2.0)) / radius;
+    let dy = (at.1 - (r[1] + r[3] / 2.0)) / radius;
+    let len = dx.hypot(dy);
+    if len <= STICK_DEADZONE {
+        return (0.0, 0.0);
+    }
+    let mag = ((len - STICK_DEADZONE) / (1.0 - STICK_DEADZONE)).min(1.0);
+    // Screen right is strafing right, screen down is walking back.
+    (-dx / len * mag, -dy / len * mag)
+}
+
+fn stick_rect(layout: &[(Control, Rect)]) -> Option<Rect> {
+    layout
+        .iter()
+        .find(|(c, _)| *c == Control::Stick)
+        .map(|(_, r)| *r)
+}
 
 #[derive(Clone, Debug)]
 enum Kind {
     Button(Control),
     World { dragged: bool, mining: bool },
+    /// The analog stick, wherever its rect is now (the layout may change under the finger).
+    Stick,
 }
 
 #[derive(Clone, Debug)]
@@ -573,6 +663,13 @@ impl Touches {
     ) -> Vec<Out> {
         let mut out = self.end(id);
         let kind = match hit(layout, at) {
+            Some(Control::Stick) => {
+                if let Some(r) = stick_rect(layout) {
+                    let (left, forward) = stick_vector(r, at);
+                    out.push(Out::Move(left, forward));
+                }
+                Kind::Stick
+            }
             Some(control) => {
                 out.push(Out::Press(control));
                 Kind::Button(control)
@@ -600,6 +697,12 @@ impl Touches {
         };
         let mut out = Vec::new();
         match &mut f.kind {
+            Kind::Stick => {
+                if let Some(r) = stick_rect(layout) {
+                    let (left, forward) = stick_vector(r, at);
+                    out.push(Out::Move(left, forward));
+                }
+            }
             Kind::Button(control) if control.moves() => {
                 if let Some(next) = hit(layout, at).filter(|c| c.moves() && c != control) {
                     out.push(Out::Release(*control));
@@ -628,6 +731,7 @@ impl Touches {
             return Vec::new();
         };
         match self.fingers.remove(i).kind {
+            Kind::Stick => vec![Out::Move(0.0, 0.0)],
             Kind::Button(control) => vec![Out::Release(control)],
             Kind::World { mining: true, .. } => vec![Out::MineEnd],
             Kind::World { dragged: false, .. } => vec![Out::Tap],
@@ -668,9 +772,11 @@ impl Touches {
 
     /// A finger holds this button down (drawn pressed).
     pub fn held(&self, control: Control) -> bool {
-        self.fingers
-            .iter()
-            .any(|f| matches!(f.kind, Kind::Button(c) if c == control))
+        self.fingers.iter().any(|f| match f.kind {
+            Kind::Button(c) => c == control,
+            Kind::Stick => control == Control::Stick,
+            Kind::World { .. } => false,
+        })
     }
 }
 
@@ -935,5 +1041,131 @@ mod tests {
             s.placements.get(&Control::Jump),
             Some(&Placement { x: 1.0, y: 0.0 })
         );
+    }
+
+    fn stick_settings() -> TouchSettings {
+        TouchSettings {
+            movement: Movement::Stick,
+            ..TouchSettings::default()
+        }
+    }
+
+    #[test]
+    fn stick_mode_replaces_the_dpad_and_moves_sneak_left_of_jump() {
+        let s = stick_settings();
+        let l = s.layout(633.0, 292.0);
+        assert!(l.iter().all(|(c, _)| !c.moves()));
+        let stick = placed(&l, Control::Stick);
+        let s_size = button_size(292.0);
+        assert!((stick[2] - 3.0 * s_size).abs() < 0.01);
+        assert!((stick[3] - 3.0 * s_size).abs() < 0.01);
+        let (sneak, jump) = (placed(&l, Control::Sneak), placed(&l, Control::Jump));
+        assert!((sneak[0] + sneak[2] + 8.0 - jump[0]).abs() < 0.01);
+        assert!((sneak[1] - jump[1]).abs() < 0.01);
+        // The D-pad mode still has its four buttons and no stick.
+        let d = TouchSettings::default().layout(633.0, 292.0);
+        assert!(d.iter().any(|(c, _)| *c == Control::Forward));
+        assert!(d.iter().all(|(c, _)| *c != Control::Stick));
+    }
+
+    #[test]
+    fn stick_mode_buttons_do_not_overlap_and_fit_the_screen() {
+        for (w, h) in [(633.0, 292.0), (427.0, 240.0), (480.0, 270.0)] {
+            let l = stick_settings().layout(w, h);
+            for (i, (a, ra)) in l.iter().enumerate() {
+                assert!(
+                    ra[0] >= 0.0 && ra[1] >= 0.0 && ra[0] + ra[2] <= w && ra[1] + ra[3] <= h,
+                    "{a:?} off screen"
+                );
+                for (b, rb) in &l[i + 1..] {
+                    let apart = ra[0] + ra[2] <= rb[0]
+                        || rb[0] + rb[2] <= ra[0]
+                        || ra[1] + ra[3] <= rb[1]
+                        || rb[1] + rb[3] <= ra[1];
+                    assert!(apart, "{a:?} overlaps {b:?} at {w}x{h}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_stick_is_dead_in_the_middle_and_full_past_the_ring() {
+        let s = stick_settings();
+        let r = placed(&s.layout(633.0, 292.0), Control::Stick);
+        let centre = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+        let radius = r[2] / 2.0;
+        assert_eq!(stick_vector(r, centre), (0.0, 0.0));
+        assert_eq!(stick_vector(r, (centre.0 + 0.1 * radius, centre.1)), (0.0, 0.0));
+        // Right strafes right, up walks forward.
+        let (left, forward) = stick_vector(r, (centre.0 + radius, centre.1));
+        assert!((left + 1.0).abs() < 0.001 && forward.abs() < 0.001);
+        let (left, forward) = stick_vector(r, (centre.0, centre.1 - radius));
+        assert!(left.abs() < 0.001 && (forward - 1.0).abs() < 0.001);
+        // Half way out: half speed once past the deadzone.
+        let (_, forward) = stick_vector(r, (centre.0, centre.1 + radius / 2.0));
+        assert!((forward + (0.5 - STICK_DEADZONE) / (1.0 - STICK_DEADZONE)).abs() < 0.001);
+        // Off the ring, the stick stays at full, and never past it.
+        let (left, forward) = stick_vector(r, (centre.0 - 2.0 * radius, centre.1 + 2.0 * radius));
+        assert!((left.hypot(forward) - 1.0).abs() < 0.001);
+        assert!(left > 0.0 && forward < 0.0);
+    }
+
+    #[test]
+    fn a_finger_on_the_stick_moves_and_a_lift_stops_it() {
+        let s = stick_settings();
+        let l = s.layout(633.0, 292.0);
+        let r = placed(&l, Control::Stick);
+        let centre = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+        let radius = r[2] / 2.0;
+        let mut t = Touches::default();
+        assert_eq!(t.start(1, centre, 0.0, &l), [Out::Move(0.0, 0.0)]);
+        assert!(t.held(Control::Stick));
+        assert_eq!(
+            t.moved(1, (centre.0 - radius, centre.1), &l),
+            [Out::Move(1.0, 0.0)]
+        );
+        assert_eq!(t.end(1), [Out::Move(0.0, 0.0)]);
+        assert!(!t.held(Control::Stick));
+    }
+
+    #[test]
+    fn the_stick_moves_while_another_finger_looks() {
+        let s = stick_settings();
+        let l = s.layout(633.0, 292.0);
+        let r = placed(&l, Control::Stick);
+        let centre = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+        let mut t = Touches::default();
+        t.start(1, centre, 0.0, &l);
+        t.start(2, (400.0, 100.0), 0.0, &l);
+        assert_eq!(t.moved(2, (420.0, 100.0), &l), [Out::Look(20.0, 0.0)]);
+        assert!(t.held(Control::Stick));
+        assert_eq!(t.release_all(), [Out::Move(0.0, 0.0)]);
+    }
+
+    #[test]
+    fn stick_settings_survive_a_round_trip() {
+        let mut s = stick_settings();
+        s.stick_scale = 1.25;
+        s.stick_opacity = 0.5;
+        s.set_placement(Control::Stick, 0.1, 0.6);
+        assert_eq!(TouchSettings::parse(&s.serialize()), s);
+        // A file written before the stick existed has no such lines, and the default file gains none.
+        let old = TouchSettings::parse("opacity:1\nscale:1\n");
+        assert_eq!(old.movement, Movement::DPad);
+        let default = TouchSettings::default().serialize();
+        assert!(!default.contains("movement") && !default.contains("stick:"));
+        // Resetting the layout keeps the mode and the stick's own size and opacity.
+        s.reset_layout();
+        assert_eq!(s.movement, Movement::Stick);
+        assert_eq!((s.stick_scale, s.stick_opacity), (1.25, 0.5));
+        assert!(!s.placements.contains_key(&Control::Stick));
+    }
+
+    #[test]
+    fn bad_stick_values_fall_back_to_the_defaults() {
+        let s = TouchSettings::parse("movement:nope\nstick:9:nope\n");
+        assert_eq!(s.movement, Movement::DPad);
+        assert_eq!(s.stick_scale, MAX_SCALE);
+        assert_eq!(s.stick_opacity, 1.0);
     }
 }
