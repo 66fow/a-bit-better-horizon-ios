@@ -5,9 +5,14 @@
 //!
 //! This module is the layout and the fingers' state: positions in GUI pixels in, [`Out`]s for the game to act
 //! on out. game/touch.rs feeds it winit's touches and acts on what comes back.
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 /// A button of the layout.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Control {
     Forward,
     Back,
@@ -113,6 +118,239 @@ pub fn hit(layout: &[(Control, Rect)], at: (f32, f32)) -> Option<Control> {
         .iter()
         .find(|(_, r)| contains(*r, at))
         .map(|(c, _)| *c)
+}
+
+/// Horizon's touch overlay settings (`horizon-touch.txt`).
+pub const FILE: &str = "horizon-touch.txt";
+
+/// A button moved by the player: its top-left corner as fractions of the screen, so a layout survives a
+/// rotation or a different phone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// How see-through the button backgrounds may become.
+pub const MIN_OPACITY: f32 = 0.2;
+/// How small and how large the buttons may grow.
+pub const MIN_SCALE: f32 = 0.75;
+pub const MAX_SCALE: f32 = 1.5;
+
+/// The controls the Touch Controls page lists, in layout order.
+pub const CONTROLS: [Control; 10] = [
+    Control::Forward,
+    Control::Back,
+    Control::Left,
+    Control::Right,
+    Control::Sneak,
+    Control::Jump,
+    Control::Perspective,
+    Control::Chat,
+    Control::Pause,
+    Control::Inventory,
+];
+
+/// The control's name in `horizon-touch.txt`; the hotbar stays where the HUD puts it.
+pub fn control_name(control: Control) -> Option<&'static str> {
+    Some(match control {
+        Control::Forward => "forward",
+        Control::Back => "back",
+        Control::Left => "left",
+        Control::Right => "right",
+        Control::Sneak => "sneak",
+        Control::Jump => "jump",
+        Control::Perspective => "perspective",
+        Control::Chat => "chat",
+        Control::Pause => "pause",
+        Control::Inventory => "inventory",
+        Control::Hotbar(_) => return None,
+    })
+}
+
+pub fn control_from_name(name: &str) -> Option<Control> {
+    Some(match name {
+        "forward" => Control::Forward,
+        "back" => Control::Back,
+        "left" => Control::Left,
+        "right" => Control::Right,
+        "sneak" => Control::Sneak,
+        "jump" => Control::Jump,
+        "perspective" => Control::Perspective,
+        "chat" => Control::Chat,
+        "pause" => Control::Pause,
+        "inventory" => Control::Inventory,
+        _ => return None,
+    })
+}
+
+/// The lang key naming a button on the settings page.
+pub fn control_caption(control: Control) -> &'static str {
+    match control {
+        Control::Forward => "horizon.options.touch.forward",
+        Control::Back => "horizon.options.touch.back",
+        Control::Left => "horizon.options.touch.left",
+        Control::Right => "horizon.options.touch.right",
+        Control::Sneak => "horizon.options.touch.sneak",
+        Control::Jump => "horizon.options.touch.jump",
+        Control::Perspective => "horizon.options.touch.perspective",
+        Control::Chat => "horizon.options.touch.chat",
+        Control::Pause => "horizon.options.touch.pause",
+        Control::Inventory => "horizon.options.touch.inventory",
+        Control::Hotbar(_) => "horizon.options.touch.hotbar",
+    }
+}
+
+/// The touch overlay as the player arranged it (`horizon-touch.txt`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TouchSettings {
+    /// How opaque the button backgrounds are; 1 draws them as Horizon always did.
+    pub opacity: f32,
+    /// How large the buttons are, `MIN_SCALE`..=`MAX_SCALE`.
+    pub scale: f32,
+    /// Buttons the player moved, by name: where their top-left corner sits.
+    pub placements: BTreeMap<Control, Placement>,
+    /// Buttons the player turned off. The pause button is never hidden: a phone needs a way back.
+    pub hidden: BTreeSet<Control>,
+}
+
+impl Default for TouchSettings {
+    fn default() -> Self {
+        Self {
+            opacity: 1.0,
+            scale: 1.0,
+            placements: BTreeMap::new(),
+            hidden: BTreeSet::new(),
+        }
+    }
+}
+
+fn clamp_unit(value: &str, default: f32, lo: f32, hi: f32) -> f32 {
+    value
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .map_or(default, |v| v.clamp(lo, hi))
+}
+
+impl TouchSettings {
+    pub fn load(dir: &Path) -> Self {
+        match fs::read_to_string(dir.join(FILE)) {
+            Ok(text) => Self::parse(&text),
+            Err(_) => Self::default(),
+        }
+    }
+    /// Written once something differs from the defaults, so players who never touch the overlay get no new
+    /// file.
+    pub fn save(&self, dir: &Path) {
+        let path = dir.join(FILE);
+        if *self != Self::default() || path.exists() {
+            let _ = fs::write(path, self.serialize());
+        }
+    }
+    pub fn parse(text: &str) -> Self {
+        let mut s = Self::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let (key, value) = (key.trim(), value.trim());
+            match key {
+                "opacity" => s.opacity = clamp_unit(value, s.opacity, MIN_OPACITY, 1.0),
+                "scale" => s.scale = clamp_unit(value, s.scale, MIN_SCALE, MAX_SCALE),
+                "hidden" => {
+                    if let Some(control) = control_from_name(value) {
+                        s.set_hidden(control, true);
+                    }
+                }
+                // `place:<name>:x,y`, as `serialize` writes it.
+                "place" => {
+                    if let Some((name, xy)) = value.split_once(':')
+                        && let Some(control) = control_from_name(name.trim())
+                        && let Some((x, y)) = xy.split_once(',')
+                    {
+                        let default = Placement { x: 0.0, y: 0.0 };
+                        let placement = Placement {
+                            x: clamp_unit(x.trim(), default.x, 0.0, 1.0),
+                            y: clamp_unit(y.trim(), default.y, 0.0, 1.0),
+                        };
+                        s.placements.insert(control, placement);
+                    }
+                }
+                _ => {}
+            }
+        }
+        s
+    }
+    pub fn serialize(&self) -> String {
+        let mut text = format!("opacity:{}\nscale:{}\n", self.opacity, self.scale);
+        for (control, placement) in &self.placements {
+            if let Some(name) = control_name(*control) {
+                text.push_str(&format!("place:{name}:{},{}\n", placement.x, placement.y));
+            }
+        }
+        for control in &self.hidden {
+            if let Some(name) = control_name(*control) {
+                text.push_str(&format!("hidden:{name}\n"));
+            }
+        }
+        text
+    }
+    /// Default positions, resized and moved; the hotbar follows the HUD and is never hidden.
+    pub fn layout(&self, w: f32, h: f32) -> Vec<(Control, Rect)> {
+        let scale = self.scale.clamp(MIN_SCALE, MAX_SCALE);
+        let mut v = layout(w, h);
+        v.retain(|(control, _)| self.visible(*control));
+        for (control, r) in &mut v {
+            if matches!(control, Control::Hotbar(_)) {
+                continue;
+            }
+            let (bw, bh) = (r[2] * scale, r[3] * scale);
+            let (mut x, mut y) = (r[0] + (r[2] - bw) / 2.0, r[1] + (r[3] - bh) / 2.0);
+            if let Some(placement) = self.placements.get(control) {
+                x = placement.x * w;
+                y = placement.y * h;
+            }
+            *r = [
+                x.clamp(0.0, (w - bw).max(0.0)),
+                y.clamp(0.0, (h - bh).max(0.0)),
+                bw,
+                bh,
+            ];
+        }
+        v
+    }
+    pub fn visible(&self, control: Control) -> bool {
+        matches!(control, Control::Hotbar(_) | Control::Pause) || !self.hidden.contains(&control)
+    }
+    pub fn set_hidden(&mut self, control: Control, hidden: bool) {
+        if matches!(control, Control::Hotbar(_) | Control::Pause) {
+            return;
+        }
+        if hidden {
+            self.hidden.insert(control);
+        } else {
+            self.hidden.remove(&control);
+        }
+    }
+    /// Where a button's top-left corner goes, as fractions of the screen.
+    pub fn set_placement(&mut self, control: Control, x: f32, y: f32) {
+        if matches!(control, Control::Hotbar(_)) {
+            return;
+        }
+        self.placements.insert(
+            control,
+            Placement {
+                x: x.clamp(0.0, 1.0),
+                y: y.clamp(0.0, 1.0),
+            },
+        );
+    }
+    /// The default positions and size; hidden buttons stay hidden and opacity stays as it is.
+    pub fn reset_layout(&mut self) {
+        self.scale = 1.0;
+        self.placements.clear();
+    }
 }
 
 /// What the game does with the fingers' changes.
@@ -353,5 +591,79 @@ mod tests {
         let mut all = t.release_all();
         all.sort_by_key(|o| format!("{o:?}"));
         assert_eq!(all, [Out::Release(Control::Forward)]);
+    }
+
+    fn placed(l: &[(Control, Rect)], control: Control) -> Rect {
+        l.iter().find(|(c, _)| *c == control).unwrap().1
+    }
+
+    #[test]
+    fn touch_settings_survive_a_round_trip() {
+        let mut s = TouchSettings::default();
+        s.opacity = 0.5;
+        s.scale = 1.25;
+        s.set_placement(Control::Jump, 0.25, 0.6);
+        s.set_hidden(Control::Chat, true);
+        assert_eq!(TouchSettings::parse(&s.serialize()), s);
+    }
+
+    #[test]
+    fn the_hotbar_and_pause_stay_on_and_in_place() {
+        let mut s = TouchSettings::default();
+        s.set_hidden(Control::Pause, true);
+        s.set_hidden(Control::Hotbar(3), true);
+        assert!(s.visible(Control::Pause));
+        assert!(s.visible(Control::Hotbar(3)));
+        let l = s.layout(633.0, 292.0);
+        assert!(l.iter().any(|(c, _)| *c == Control::Pause));
+        assert!(l.iter().any(|(c, _)| *c == Control::Hotbar(3)));
+    }
+
+    #[test]
+    fn a_hidden_button_leaves_the_layout() {
+        let mut s = TouchSettings::default();
+        s.set_hidden(Control::Chat, true);
+        let l = s.layout(633.0, 292.0);
+        assert!(!l.iter().any(|(c, _)| *c == Control::Chat));
+        assert_eq!(l.len(), layout(633.0, 292.0).len() - 1);
+    }
+
+    #[test]
+    fn a_placement_moves_a_button_and_keeps_it_on_screen() {
+        let mut s = TouchSettings::default();
+        s.set_placement(Control::Jump, 0.1, 0.2);
+        let r = placed(&s.layout(600.0, 300.0), Control::Jump);
+        assert!((r[0] - 60.0).abs() < 0.01 && (r[1] - 60.0).abs() < 0.01);
+        // Far over the edge: the button is pulled back onto the screen.
+        s.set_placement(Control::Jump, 5.0, 5.0);
+        let r = placed(&s.layout(600.0, 300.0), Control::Jump);
+        assert!(r[0] >= 0.0 && r[1] >= 0.0);
+        assert!(r[0] + r[2] <= 600.0 && r[1] + r[3] <= 300.0);
+    }
+
+    #[test]
+    fn scale_resizes_buttons_but_not_the_hotbar() {
+        let mut s = TouchSettings::default();
+        s.scale = 1.5;
+        let base = layout(600.0, 300.0);
+        let l = s.layout(600.0, 300.0);
+        let (b, j) = (placed(&base, Control::Jump), placed(&l, Control::Jump));
+        assert!((j[2] - b[2] * 1.5).abs() < 0.01);
+        assert_eq!(
+            placed(&l, Control::Hotbar(0)),
+            placed(&base, Control::Hotbar(0))
+        );
+    }
+
+    #[test]
+    fn bad_values_fall_back_to_the_defaults() {
+        let s = TouchSettings::parse("opacity:9\nscale:nope\nhidden:pause\nplace:jump:2,-1\n");
+        assert_eq!(s.opacity, 1.0);
+        assert_eq!(s.scale, 1.0);
+        assert!(s.visible(Control::Pause));
+        assert_eq!(
+            s.placements.get(&Control::Jump),
+            Some(&Placement { x: 1.0, y: 0.0 })
+        );
     }
 }

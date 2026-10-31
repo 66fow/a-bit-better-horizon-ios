@@ -213,6 +213,9 @@ impl Opt {
             Opt::PadGlyphs => "horizon.options.button_glyphs",
             Opt::PadMenuNav => "horizon.options.menu_navigation",
             Opt::PadKeyboard => "horizon.options.on_screen_keyboard",
+            Opt::TouchOpacity => "horizon.options.touch_opacity",
+            Opt::TouchScale => "horizon.options.touch_scale",
+            Opt::TouchShow(control) => crate::touch::control_caption(control),
         }
     }
     pub(crate) fn kind(self, s: &Settings) -> Kind {
@@ -257,6 +260,12 @@ impl Opt {
             Opt::PadLookSensitivity => Kind::Slider(s.controller.look_sensitivity),
             Opt::PadMoveDeadzone => unit(s.controller.move_deadzone, 0.0, 0.5),
             Opt::PadLookDeadzone => unit(s.controller.look_deadzone, 0.0, 0.5),
+            Opt::TouchOpacity => unit(s.touch.opacity, crate::touch::MIN_OPACITY, 1.0),
+            Opt::TouchScale => unit(
+                s.touch.scale,
+                crate::touch::MIN_SCALE,
+                crate::touch::MAX_SCALE,
+            ),
             _ => Kind::Cycle,
         }
     }
@@ -433,6 +442,9 @@ impl Opt {
                     ],
                 )
             }
+            Opt::TouchOpacity => percent(c, s.touch.opacity),
+            Opt::TouchScale => percent(c, s.touch.scale),
+            Opt::TouchShow(control) => on_off(s.touch.visible(control)),
             _ => generic(c, self.value_text(s)),
         }
     }
@@ -599,6 +611,8 @@ impl Opt {
             Opt::PadLookSensitivity => s.controller.look_sensitivity = v,
             Opt::PadMoveDeadzone => s.controller.move_deadzone = step(0.0, 50.0) / 100.0,
             Opt::PadLookDeadzone => s.controller.look_deadzone = step(0.0, 50.0) / 100.0,
+            Opt::TouchOpacity => s.touch.opacity = step(20.0, 100.0) / 100.0,
+            Opt::TouchScale => s.touch.scale = step(75.0, 150.0) / 100.0,
             _ => {}
         }
         if self.affects_preset() {
@@ -740,6 +754,10 @@ impl Opt {
                     .unwrap_or(0) as u8;
                 s.controller.keyboard = all[usize::from(next(i, 3))];
             }
+            Opt::TouchShow(control) => {
+                let shown = s.touch.visible(control);
+                s.touch.set_hidden(control, shown);
+            }
             _ => {}
         }
         if self.affects_preset() {
@@ -825,6 +843,10 @@ pub enum Page {
     /// Horizon's controller settings and button binds.
     Controller,
     PadBinds,
+    /// Horizon's touch overlay: its buttons, size, opacity, and where they sit.
+    Touch,
+    /// The touch overlay's drag-and-drop editor.
+    TouchLayout,
     Extras,
     /// CreditsAndAttributionScreen.
     Credits,
@@ -859,6 +881,8 @@ enum Act {
     /// Credits & Attribution's Credits button (WinScreen without the poem).
     Credits,
     CopyAgentDetails,
+    /// Put the touch overlay's buttons back in their default places.
+    TouchReset,
 }
 enum WKind {
     Button {
@@ -881,6 +905,8 @@ enum WKind {
         selected: bool,
         code: String,
     },
+    /// A touch button where the overlay puts it: dragged on the Touch Controls editor.
+    TouchControl(crate::touch::Control),
 }
 struct Widget {
     x: f32,
@@ -940,6 +966,9 @@ pub struct OptionsUi {
     pub stack: Vec<Page>,
     scroll: f32,
     pub(crate) dragging: Option<Opt>,
+    /// The Touch Controls editor: the button being dragged and how far the pointer was from its top-left
+    /// corner when it went down (GUI pixels).
+    pub(crate) dragging_touch: Option<(crate::touch::Control, (f32, f32))>,
     /// The pressed slider's own position (`AbstractSliderButton.value`) and
     /// when it last moved: the handle follows the pointer while the option
     /// keeps its stepped value, then snaps to it (`resetValue`).
@@ -982,6 +1011,7 @@ impl Default for OptionsUi {
             stack: vec![Page::Main],
             scroll: 0.0,
             dragging: None,
+            dragging_touch: None,
             slider_value: None,
             scrollbar_drag_y: None,
             selected_key: None,
@@ -1052,6 +1082,9 @@ fn horizon_page_tooltip(page: Page) -> Option<&'static str> {
             "Every graphics setting, Horizon's included, with what each costs."
         }
         Page::Controller => "Controllers: their buttons, sticks, vibration and menu navigation.",
+        Page::Touch => {
+            "The touch overlay: where its buttons are, how big they are and how see-through."
+        }
         Page::Extras => {
             "Optional additions, all off by default: the game stays vanilla until you turn one on."
         }
@@ -1142,6 +1175,7 @@ impl OptionsUi {
         self.stack.push(page);
         self.scroll = 0.0;
         self.scrollbar_drag_y = None;
+        self.dragging_touch = None;
         if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
             self.settings_search.set_value("");
             self.settings_search.focused = false;
@@ -1184,6 +1218,7 @@ impl OptionsUi {
             Page::Graphics | Page::GraphicsAdvanced => "options.videoTitle",
             Page::Controller => "Controller Settings",
             Page::PadBinds => "Controller Binds",
+            Page::Touch | Page::TouchLayout => "Touch Controls",
             Page::Extras => "Horizon Extras",
             Page::Credits => "credits_and_attribution.screen.title",
             Page::Horizon => "Horizon Settings",
@@ -1434,7 +1469,49 @@ impl OptionsUi {
                     ),
                     None,
                 ));
+                rows.push(Row::Buttons(
+                    button(
+                        0.0,
+                        0.0,
+                        310.0,
+                        Text::literal("Touch Controls..."),
+                        Act::Push(Page::Touch),
+                    ),
+                    None,
+                ));
                 self.filter_option_rows(rows)
+            }
+            Page::Touch => {
+                let mut rows = vec![Row::Note(
+                    "Drag the buttons into place, then tap Done.".to_owned(),
+                )];
+                rows.push(Row::Buttons(
+                    button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        Text::literal("Edit Layout..."),
+                        Act::Push(Page::TouchLayout),
+                    ),
+                    Some(button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        Text::literal("Reset Layout"),
+                        Act::TouchReset,
+                    )),
+                ));
+                rows.push(Row::Big(Opt::TouchOpacity));
+                rows.push(Row::Big(Opt::TouchScale));
+                rows.push(Row::Header("Buttons"));
+                // The pause button stays: without it a phone has no way back to its menus.
+                let shown: Vec<Opt> = crate::touch::CONTROLS
+                    .into_iter()
+                    .filter(|c| *c != crate::touch::Control::Pause)
+                    .map(Opt::TouchShow)
+                    .collect();
+                rows.extend(pairs(&shown));
+                rows
             }
             Page::Controller => {
                 let mut rows = vec![Row::Buttons(
@@ -1883,6 +1960,33 @@ impl OptionsUi {
                 ));
                 out.push(button(cx + 4.0, h - 27.0, 150.0, tr("gui.done"), Act::Done));
             }
+            Page::TouchLayout => {
+                // The overlay at the positions the game draws it; dragging a button moves it. The
+                // hotbar follows the HUD, so it is not part of the editor.
+                out.push(button(
+                    4.0,
+                    4.0,
+                    60.0,
+                    tr("controls.reset"),
+                    Act::TouchReset,
+                ));
+                out.push(button(w - 64.0, 4.0, 60.0, tr("gui.done"), Act::Done));
+                for (control, r) in s.touch.layout(w, h) {
+                    if matches!(control, crate::touch::Control::Hotbar(_)) {
+                        continue;
+                    }
+                    out.push(Widget {
+                        x: r[0],
+                        y: r[1],
+                        w: r[2],
+                        h: r[3],
+                        kind: WKind::TouchControl(control),
+                        list: false,
+                    });
+                }
+                top = 0.0;
+                bottom = 0.0;
+            }
             Page::Language => {
                 top = 36.0;
                 bottom = h - 53.0;
@@ -2313,6 +2417,20 @@ impl OptionsUi {
                         true,
                     );
                 }
+                WKind::TouchControl(control) => {
+                    let held = self
+                        .dragging_touch
+                        .as_ref()
+                        .is_some_and(|(c, _)| c == control);
+                    crate::touch_draw::draw_control(
+                        batch,
+                        atlas,
+                        *control,
+                        [wd.x, wd.y, wd.w, wd.h],
+                        held,
+                        s.touch.opacity,
+                    );
+                }
             }
             if wd.list && (wd.y < top || wd.y + wd.h > bottom) {
                 batch.clip_since(start, 0.0, top, w, bottom);
@@ -2461,6 +2579,18 @@ impl OptionsUi {
             }
         }
         if drag {
+            if let Some((control, grab)) = self.dragging_touch {
+                if let Some(wd) = widgets
+                    .iter()
+                    .find(|wd| matches!(&wd.kind, WKind::TouchControl(c) if *c == control))
+                {
+                    let x = (x - grab.0).clamp(0.0, (size.0 - wd.w).max(0.0));
+                    let y = (y - grab.1).clamp(0.0, (size.1 - wd.h).max(0.0));
+                    s.touch
+                        .set_placement(control, x / size.0.max(1.0), y / size.1.max(1.0));
+                }
+                return events;
+            }
             if let Some(previous_y) = self.scrollbar_drag_y {
                 if let Some((_, thumb)) = ui::scrollbar_thumb(top, bottom, content, self.scroll) {
                     let max = content - (bottom - top);
@@ -2605,6 +2735,10 @@ impl OptionsUi {
                         Act::OpenShaderPackFolder => events.push(Event::OpenShaderPackFolder),
                         Act::Credits => events.push(Event::Credits),
                         Act::CopyAgentDetails => events.push(Event::CopyAgentDetails),
+                        Act::TouchReset => {
+                            s.touch.reset_layout();
+                            events.push(Event::Changed);
+                        }
                         Act::None => {}
                     }
                 }
@@ -2621,6 +2755,10 @@ impl OptionsUi {
                     } else {
                         self.language_choice = Some(code);
                     }
+                }
+                WKind::TouchControl(control) => {
+                    self.dragging_touch = Some((control, (x - wd.x, y - wd.y)));
+                    events.push(Event::ButtonClick);
                 }
                 _ => {}
             }
@@ -2643,13 +2781,17 @@ impl OptionsUi {
         }
         // AbstractSliderButton suppresses the press sound and plays once on
         // release, even if the pointer has left the widget or its value stayed.
+        let mut events = Vec::new();
         let slider = self.dragging.take().is_some();
         let graphics_slider = self.graphics.release();
         if slider || graphics_slider {
-            vec![Event::ButtonClick]
-        } else {
-            Vec::new()
+            events.push(Event::ButtonClick);
         }
+        // A dragged touch button stays where the finger left it, saved with the rest of the settings.
+        if self.dragging_touch.take().is_some() {
+            events.push(Event::Changed);
+        }
+        events
     }
     pub fn scroll(&mut self, s: &Settings, size: (f32, f32), amount: f32) {
         let (_, top, bottom, content) = self.layout(s, size.0, size.1);
@@ -2704,6 +2846,7 @@ impl OptionsUi {
         self.scrollbar_drag_y = None;
         self.dragging = None;
         self.slider_value = None;
+        self.dragging_touch = None;
         self.selected_key = None;
         self.selected_pad_action = None;
         match page {
@@ -2987,6 +3130,30 @@ mod tests {
         assert!(file.set_text("renderDistance", "1").is_err());
         assert_eq!(file.int("renderDistance"), 64);
     }
+    #[test]
+    fn dragging_a_touch_button_moves_it_and_releases_a_change() {
+        use crate::touch::Control;
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::TouchLayout);
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let wd = widgets
+            .iter()
+            .find(|w| matches!(w.kind, WKind::TouchControl(Control::Jump)))
+            .unwrap();
+        let (px, py) = (wd.x + wd.w / 2.0, wd.y + wd.h / 2.0);
+        assert_eq!(
+            ui.click(&mut s, &atlas, px, py, size, [960, 960], false, false),
+            vec![Event::ButtonClick]
+        );
+        ui.click(&mut s, &atlas, 20.0, 20.0, size, [960, 960], true, false);
+        assert_eq!(ui.release(), vec![Event::Changed]);
+        let placed = s.touch.placements[&Control::Jump];
+        assert!(placed.x < 0.1 && placed.y < 0.1);
+    }
+
     fn atlas() -> HudAtlas {
         HudAtlas::build(std::path::Path::new("/nonexistent/horizon-test-assets")).unwrap()
     }

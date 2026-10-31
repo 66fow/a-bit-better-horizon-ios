@@ -11,5 +11,18 @@
   "horizon.options.look_deadzone": "Look Deadzone",
   "horizon.options.button_glyphs": "Button Glyphs",
   "horizon.options.menu_navigation": "Menu Navigation",
-  "horizon.options.on_screen_keyboard": "On-Screen Keyboard"
+  "horizon.options.on_screen_keyboard": "On-Screen Keyboard",
+  "horizon.options.touch_opacity": "Button Opacity",
+  "horizon.options.touch_scale": "Button Size",
+  "horizon.options.touch.forward": "Forward",
+  "horizon.options.touch.back": "Back",
+  "horizon.options.touch.left": "Left",
+  "horizon.options.touch.right": "Right",
+  "horizon.options.touch.sneak": "Sneak",
+  "horizon.options.touch.jump": "Jump",
+  "horizon.options.touch.perspective": "Perspective",
+  "horizon.options.touch.chat": "Chat",
+  "horizon.options.touch.pause": "Pause",
+  "horizon.options.touch.inventory": "Inventory",
+  "horizon.options.touch.hotbar": "Hotbar"
 }

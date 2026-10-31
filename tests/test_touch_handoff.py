@@ -36,13 +36,17 @@ struct MenuFinger { id: u64, pressed: bool, closed: bool }
 #[derive(Default)]
 struct TouchInput { seen: bool, hardware: input_mode::InputMode,
     menu: Option<MenuFinger>, fingers: Touches }
+#[derive(Default)]
+struct Settings { touch: touch::TouchSettings }
 struct Game { touch: TouchInput, last_input: Instant, playing: bool,
+    settings: Settings,
     actions: Vec<Out>, buttons: Vec<bool>, menu_calls: usize }
 mod horizon_gamecontroller { pub fn keyboard_connected() -> bool { true } }
 impl Game {
     fn new(playing: bool, pressed: bool) -> Self {
         Self { touch: TouchInput { menu: Some(MenuFinger { id: 1, pressed, closed: false }),
             ..TouchInput::default() }, last_input: Instant::now(), playing,
+            settings: Settings::default(),
             actions: vec![], buttons: vec![], menu_calls: 0 }
     }
     fn touch_batch(&self) -> Option<Batch> { Some(Batch { scale: 2.0, width: 500.0, height: 300.0 }) }

@@ -11,5 +11,18 @@
   "horizon.options.look_deadzone": "Мёртвая зона обзора",
   "horizon.options.button_glyphs": "Символы кнопок",
   "horizon.options.menu_navigation": "Навигация по меню",
-  "horizon.options.on_screen_keyboard": "Экранная клавиатура"
+  "horizon.options.on_screen_keyboard": "Экранная клавиатура",
+  "horizon.options.touch_opacity": "Непрозрачность кнопок",
+  "horizon.options.touch_scale": "Размер кнопок",
+  "horizon.options.touch.forward": "Вперёд",
+  "horizon.options.touch.back": "Назад",
+  "horizon.options.touch.left": "Влево",
+  "horizon.options.touch.right": "Вправо",
+  "horizon.options.touch.sneak": "Приседание",
+  "horizon.options.touch.jump": "Прыжок",
+  "horizon.options.touch.perspective": "Вид",
+  "horizon.options.touch.chat": "Чат",
+  "horizon.options.touch.pause": "Пауза",
+  "horizon.options.touch.inventory": "Инвентарь",
+  "horizon.options.touch.hotbar": "Панель быстрого доступа"
 }

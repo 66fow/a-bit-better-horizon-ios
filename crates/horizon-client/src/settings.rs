@@ -175,6 +175,8 @@ pub struct Settings {
     pub horizon: crate::graphics::Graphics,
     /// Controller settings (`horizon-controller.txt`, Horizon's own).
     pub controller: crate::gamepad::PadSettings,
+    /// Touch overlay settings (`horizon-touch.txt`, Horizon's own).
+    pub touch: crate::touch::TouchSettings,
     /// Horizon's optional extras (`horizon-extras.txt`), all off by default.
     pub extras: crate::extras::Extras,
     /// The Horizon mods turned on (`horizon-mods.txt`), all off by default.
@@ -254,6 +256,7 @@ impl Default for Settings {
             sprint_window: 7,
             horizon: Default::default(),
             controller: Default::default(),
+            touch: Default::default(),
             extras: Default::default(),
             mods: Default::default(),
             shader_packs: Vec::new(),
@@ -303,12 +306,17 @@ impl Settings {
             .parent()
             .map(crate::mod_list::ModList::load)
             .unwrap_or_default();
+        let touch = path
+            .parent()
+            .map(crate::touch::TouchSettings::load)
+            .unwrap_or_default();
         let settings = match fs::read(path) {
             Ok(bytes) => Self {
                 horizon,
                 controller,
                 extras,
                 mods,
+                touch,
                 ..Self::parse(&String::from_utf8_lossy(&bytes))
             },
             Err(_) => Self {
@@ -316,6 +324,7 @@ impl Settings {
                 controller,
                 extras,
                 mods,
+                touch,
                 ..Self::default()
             },
         };
@@ -415,6 +424,7 @@ impl Settings {
             sprint_window: f.int("sprintWindow"),
             horizon: Default::default(),
             controller: Default::default(),
+            touch: Default::default(),
             extras: Default::default(),
             mods: Default::default(),
             shader_packs: Vec::new(),
@@ -553,6 +563,7 @@ impl Settings {
         Ok(Self {
             horizon: self.horizon.clone(),
             controller: self.controller.clone(),
+            touch: self.touch.clone(),
             extras: self.extras.clone(),
             mods: self.mods.clone(),
             ..Self::from_file(file)
@@ -568,6 +579,7 @@ impl Settings {
         if let Some(dir) = path.parent() {
             self.horizon.save(dir);
             self.controller.save(dir);
+            self.touch.save(dir);
             self.extras.save(dir);
             self.mods.save(dir);
         }
@@ -699,6 +711,11 @@ pub enum Opt {
     PadGlyphs,
     PadMenuNav,
     PadKeyboard,
+    /// Horizon's touch overlay settings (`horizon-touch.txt`).
+    TouchOpacity,
+    TouchScale,
+    /// Whether a button of the touch overlay is shown.
+    TouchShow(crate::touch::Control),
 }
 
 #[cfg(test)]
@@ -711,12 +728,14 @@ mod tests {
         s.extras.minimap = true;
         s.horizon.fog = !s.horizon.fog;
         s.controller.vibration = !s.controller.vibration;
+        s.touch.opacity = 0.5;
         let set = s.with_option("fov", "90").unwrap();
         assert_eq!(set.fov, 90.0);
         assert_eq!(set.mods, s.mods);
         assert_eq!(set.extras, s.extras);
         assert_eq!(set.horizon, s.horizon);
         assert_eq!(set.controller, s.controller);
+        assert_eq!(set.touch, s.touch);
         assert!(s.with_option("fov", "200").is_err());
     }
     #[test]
