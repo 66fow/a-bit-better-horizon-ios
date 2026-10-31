@@ -60,7 +60,7 @@ struct GalleryPage: View {
                         }
                         .buttonStyle(PressStyle())
                         .contextMenu {
-                            ShareLink(item: shot.url) { Label("Share", systemImage: "square.and.arrow.up") }
+                            CompatShareLink(item: shot.url) { Label("Share", systemImage: "square.and.arrow.up") }
                             Button(role: .destructive) {
                                 delete(shot)
                             } label: { Label("Delete", systemImage: "trash") }
@@ -132,7 +132,7 @@ private struct ShotViewer: View {
                 Text(current.date.formatted(date: .abbreviated, time: .shortened))
                     .font(Theme.mono(11))
                 Spacer()
-                ShareLink(item: current.url) {
+                CompatShareLink(item: current.url) {
                     Image(systemName: "square.and.arrow.up").font(.system(size: 16, weight: .semibold))
                         .frame(width: 44, height: 44)
                 }

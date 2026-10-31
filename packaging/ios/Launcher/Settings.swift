@@ -150,7 +150,7 @@ struct SettingsPage: View {
                 NewsPage().pageColumn()
             }
             .background(Theme.background.ignoresSafeArea())
-            .presentationDetents([.large])
+            .horizonDetents(.large)
 
         }
     }

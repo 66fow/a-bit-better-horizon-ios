@@ -17,7 +17,7 @@ class IOSSceneManifestTests(unittest.TestCase):
         self.assertEqual(configs[0]["UISceneClassName"], "UIWindowScene")
         self.assertEqual(configs[0]["UISceneDelegateClassName"], "WinitSceneDelegate")
         self.assertNotIn("UISceneStoryboardFile", configs[0])
-        self.assertEqual(info["MinimumOSVersion"], "16.0")
+        self.assertEqual(info["MinimumOSVersion"], "15.0")
 
     def test_plist_delegate_matches_registered_backend_class(self):
         with (ROOT / "packaging/ios/GameInfo.plist").open("rb") as source:

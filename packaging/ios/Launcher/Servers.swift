@@ -219,7 +219,7 @@ private struct AddServerSheet: View {
             .padding(20)
         }
         .background(Theme.background.ignoresSafeArea())
-        .presentationDetents([.medium])
+        .horizonDetents(.medium)
 
     }
 }

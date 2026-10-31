@@ -1,7 +1,7 @@
 name: LauncherPreview
 options:
   deploymentTarget:
-    iOS: '16.0'
+    iOS: '15.0'
 settings:
   base:
     SWIFT_VERSION: '5.0'

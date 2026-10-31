@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
 use objc2::rc::Retained;
-use objc2::{declare_class, msg_send, msg_send_id, mutability, ClassType, DeclaredClass};
+use objc2::{declare_class, msg_send, msg_send_id, mutability, sel, ClassType, DeclaredClass};
 use objc2_foundation::{MainThreadMarker, NSObject};
 use objc2_ui_kit::{
     UIDevice, UIInterfaceOrientationMask, UIRectEdge, UIResponder, UIStatusBarStyle,
@@ -83,8 +83,13 @@ declare_class!(
 impl WinitViewController {
     pub(crate) fn set_pointer_locked(&self, locked: bool) {
         if self.ivars().pointer_locked.replace(locked) != locked {
-            // Public UIKit API, available since iPadOS 14 (Horizon requires 16).
-            let _: () = unsafe { msg_send![self, setNeedsUpdateOfPrefersPointerLocked] };
+            // Public UIKit API, iOS 16; on 15 the pointer simply stays uncaptured.
+            let responds: bool = unsafe {
+                msg_send![self, respondsToSelector: sel!(setNeedsUpdateOfPrefersPointerLocked)]
+            };
+            if responds {
+                let _: () = unsafe { msg_send![self, setNeedsUpdateOfPrefersPointerLocked] };
+            }
         }
     }
 

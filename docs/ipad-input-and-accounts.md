@@ -16,7 +16,7 @@ launcher presentation, and focus loss release capture. UIKit may decline a captu
 
 Touch overlays follow the last input device used. Connecting hardware alone does not hide them;
 touch input or disconnection of the last-used device restores them. Controllers remain supported.
-The app minimum stays iOS 16. See [the vendored patch notes](../third_party/winit/HORIZON.md)
+The app minimum is iOS 15. See [the vendored patch notes](../third_party/winit/HORIZON.md)
 for provenance, platform API requirements, and removal criteria.
 
 The app declares one programmatic UIWindowScene. Winit waits for the scene connection before

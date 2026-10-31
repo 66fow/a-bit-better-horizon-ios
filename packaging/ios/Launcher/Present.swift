@@ -52,14 +52,20 @@ private func present(attempts: Int) {
 /// Ask the scene to turn to `orientations` now, rather than when the phone is next moved.
 func turn(_ scene: UIWindowScene?, to orientations: UIInterfaceOrientationMask) {
     guard let scene else { return }
-    for window in scene.windows {
-        var top = window.rootViewController
-        while let next = top?.presentedViewController {
-            top = next
+    if #available(iOS 16.0, *) {
+        for window in scene.windows {
+            var top = window.rootViewController
+            while let next = top?.presentedViewController {
+                top = next
+            }
+            top?.setNeedsUpdateOfSupportedInterfaceOrientations()
         }
-        top?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientations)) { _ in }
+    } else {
+        // iOS 15 has no scene geometry request: UIKit turns when a view controller that supports the
+        // orientations is presented, and asks again after this nudge.
+        UIViewController.attemptRotationToDeviceOrientation()
     }
-    scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientations)) { _ in }
 }
 
 /// The view controller of winit's window: the one the launcher is presented from.

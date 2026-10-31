@@ -6,7 +6,7 @@ Three files and one crate make the app shell, and a fourth puts the game itself 
   `brew install xcodegen && xcodegen generate` in this folder to write `HorizonIOS.xcodeproj`, which is
   not checked in. Its paths are relative to this directory, so generate it from here.
 - `Info.plist`: the bundle's plist, filled in by Xcode from `project.yml`'s `MARKETING_VERSION` and
-  `CURRENT_PROJECT_VERSION`. Bundle id `dev.horizon.ios`, iOS 16 or later, iPhone and iPad.
+  `CURRENT_PROJECT_VERSION`. Bundle id `dev.horizon.ios`, iOS 15 or later, iPhone and iPad.
 - `Sources/main.m`: the app. One `AppDelegate`, one view controller, and no storyboard: it calls
   `horizon_probe()` in `viewDidLoad` and shows what came back in a monospaced text view.
 - `GameInfo.plist`: a second bundle's plist, for the `.ipa` whose executable is the cross-compiled

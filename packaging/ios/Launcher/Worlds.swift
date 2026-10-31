@@ -188,7 +188,7 @@ struct NewWorldSheet: View {
     private var hardcore: Bool { settings.mode == "hardcore" }
 
     var body: some View {
-        NavigationStack {
+        CompatNavigationStack {
             Form {
                 Section {
                     TextField("World name", text: $settings.name)
@@ -232,8 +232,8 @@ struct NewWorldSheet: View {
                 if mode == "hardcore" { settings.difficulty = "hard"; settings.bonus_chest = false }
             }
         }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
+        .horizonDetents(.large)
+        .horizonDragIndicator()
     }
 }
 

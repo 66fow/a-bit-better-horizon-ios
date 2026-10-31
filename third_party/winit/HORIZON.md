@@ -24,7 +24,9 @@ relative movement, captured buttons, and scroll. New mice are attached during re
 disconnection releases buttons. Handler queues remain Apple's documented main-thread default.
 Captured indirect pointer touches are suppressed so one click does not also hit touch controls.
 
-The app requires iOS 16; pointer lock/GCMouse require iPadOS 14 and UIKey requires iOS 13.4.
+The app requires iOS 15; UIKey requires iOS 13.4 and GCMouse requires iOS 14. pointerLockState
+is readable on iOS 14, but prefersPointerLocked/setNeedsUpdateOfPrefersPointerLocked are iOS 16,
+so capture requests are skipped on iOS 15 and the pointer stays uncaptured there.
 UIKit ultimately decides whether to honor lock requests. Touch/controller input remains the
 fallback when no supported mouse is present. No cursor warping or private API is used.
 

@@ -34,46 +34,9 @@ struct HomeView: View {
     var body: some View {
         Group {
             if sizeClass == .regular {
-                NavigationSplitView {
-                    VStack(alignment: .leading, spacing: 28) {
-                        HStack(spacing: 12) {
-                            Kit.image("horizon-mark").resizable().renderingMode(.template).scaledToFit().frame(width: 32, height: 32)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Horizon").font(.system(.title3, design: .rounded).bold())
-                                Text("JAVA EDITION").font(.caption2.weight(.medium)).tracking(1.5).foregroundStyle(.secondary)
-                            }
-                        }.padding(.horizontal, 12)
-                        VStack(spacing: 8) {
-                            ForEach(Destination.allCases) { item in
-                                Button { tab = item } label: {
-                                    Label(item.title, systemImage: item.icon)
-                                        .font(.system(.body, design: .rounded).weight(tab == item ? .semibold : .medium))
-                                        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
-                                        .padding(.horizontal, 16)
-                                        .foregroundStyle(tab == item ? Theme.accent : Theme.textMuted)
-                                        .background(tab == item ? Theme.notice : .clear, in: RoundedRectangle(cornerRadius: 18))
-                                }.buttonStyle(.plain).accessibilityIdentifier("launcher-nav-" + item.rawValue)
-                            }
-                        }
-                        Spacer()
-                    }
-                    .padding(20).padding(.top, 12)
-                    .background(Theme.background)
-                    .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 280)
-                    .accessibilityIdentifier("launcher-navigation-rail")
-                } detail: {
-                    NavigationStack { destination(tab) }
-                }
-                .navigationSplitViewStyle(.balanced)
+                split
             } else {
-                TabView(selection: $tab) {
-                    ForEach(Destination.allCases) { item in
-                        NavigationStack { destination(item) }
-                            .tabItem { Label(item.title, systemImage: item.icon) }
-                            .tag(item)
-                    }
-                }
-
+                tabView
             }
         }
         .background(Theme.background.ignoresSafeArea())
@@ -99,6 +62,64 @@ struct HomeView: View {
             if profile != nil { editingName = false; nameDraft = "" }
         }
         .task { link.uncover = onPlay; await link.watch() }
+    }
+
+    /// The iPad layout: a navigation rail beside the pages. NavigationSplitView is iOS 16; on iOS 15 a
+    /// two-column NavigationView gives the same sidebar-beside-detail shape.
+    @ViewBuilder private var split: some View {
+        if #available(iOS 16.0, *) {
+            NavigationSplitView {
+                sidebar
+                    .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 280)
+            } detail: {
+                NavigationStack { destination(tab) }
+            }
+            .navigationSplitViewStyle(.balanced)
+        } else {
+            NavigationView {
+                sidebar
+                destination(tab)
+            }
+            .navigationViewStyle(.columns)
+        }
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 28) {
+            HStack(spacing: 12) {
+                Kit.image("horizon-mark").resizable().renderingMode(.template).scaledToFit().frame(width: 32, height: 32)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Horizon").font(.system(.title3, design: .rounded).bold())
+                    Text("JAVA EDITION").font(.caption2.weight(.medium)).tracking(1.5).foregroundStyle(.secondary)
+                }
+            }.padding(.horizontal, 12)
+            VStack(spacing: 8) {
+                ForEach(Destination.allCases) { item in
+                    Button { tab = item } label: {
+                        Label(item.title, systemImage: item.icon)
+                            .font(.system(.body, design: .rounded).weight(tab == item ? .semibold : .medium))
+                            .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .foregroundStyle(tab == item ? Theme.accent : Theme.textMuted)
+                            .background(tab == item ? Theme.notice : .clear, in: RoundedRectangle(cornerRadius: 18))
+                    }.buttonStyle(.plain).accessibilityIdentifier("launcher-nav-" + item.rawValue)
+                }
+            }
+            Spacer()
+        }
+        .padding(20).padding(.top, 12)
+        .background(Theme.background)
+        .accessibilityIdentifier("launcher-navigation-rail")
+    }
+
+    private var tabView: some View {
+        TabView(selection: $tab) {
+            ForEach(Destination.allCases) { item in
+                CompatNavigationStack { destination(item) }
+                    .tabItem { Label(item.title, systemImage: item.icon) }
+                    .tag(item)
+            }
+        }
     }
 
     private func pageHeading(_ item: Destination) -> some View {
@@ -152,7 +173,7 @@ struct HomeView: View {
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.hidden, for: .navigationBar)
+        .horizonHiddenNavigationBarBackground()
     }
 
     private func page<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -235,7 +256,7 @@ struct HomeView: View {
     }
 
     private var accountSheet: some View {
-        NavigationStack {
+        CompatNavigationStack {
             Form {
                 Section {
                     HStack(spacing: 16) {
@@ -254,7 +275,7 @@ struct HomeView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showingAccount = false } } }
         }
-        .presentationDetents([.medium, .large])
+        .horizonDetents(.mediumLarge)
     }
 }
 
