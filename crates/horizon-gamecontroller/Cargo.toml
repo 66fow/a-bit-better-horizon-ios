@@ -10,6 +10,7 @@ description = "Controllers on iPhone and iPad through Apple's GameController fra
 # nothing else to read a pad with (gilrs has no iOS backend).
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6.3"
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "UIPasteboard"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSString"] }
 objc2-game-controller = { version = "0.3.2", default-features = false, features = ["std", "GCKeyboard", "GCMouse", "GCController", "GCDevice", "GCExtendedGamepad", "GCPhysicalInputProfile", "GCControllerElement", "GCControllerButtonInput", "GCControllerAxisInput", "GCControllerDirectionPad"] }
 

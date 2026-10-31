@@ -134,3 +134,32 @@ pub fn mouse_connected() -> bool {
     #[cfg(not(target_os = "ios"))]
     false
 }
+
+/// Read iPadOS/iOS text when a game edit shortcut explicitly requests paste.
+/// `None` means the caller is not on UIKit's main thread; no pasteboard access is attempted.
+pub fn clipboard_text() -> Option<String> {
+    #[cfg(target_os = "ios")]
+    {
+        let _main = objc2::MainThreadMarker::new()?;
+        let board = objc2_ui_kit::UIPasteboard::generalPasteboard();
+        // SAFETY: UIKit is accessed on its main thread and the retained NSString
+        // is converted to owned text before returning to the caller.
+        Some(unsafe { board.string() }.map_or_else(String::new, |s| s.to_string()))
+    }
+    #[cfg(not(target_os = "ios"))]
+    None
+}
+
+/// Write text copied by the game to the iOS system pasteboard.
+pub fn set_clipboard_text(text: &str) {
+    #[cfg(target_os = "ios")]
+    if let Some(_main) = objc2::MainThreadMarker::new() {
+        let board = objc2_ui_kit::UIPasteboard::generalPasteboard();
+        let text = objc2_foundation::NSString::from_str(text);
+        // SAFETY: main-thread UIKit access; the string stays alive throughout
+        // the call and UIPasteboard copies its value.
+        unsafe { board.setString(Some(&text)) };
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = text;
+}

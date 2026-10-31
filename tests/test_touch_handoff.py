@@ -104,7 +104,7 @@ fn cancelled_menu_finger_releases_without_delayed_press() {
     }
 }
 '''
-        fixture = fixture.replace("TOUCH_SOURCE", str(ROOT / "crates/horizon-client/src/touch.rs"))
+        fixture = fixture.replace("TOUCH_SOURCE", str(ROOT / "crates/horizon-client-render/src/touch.rs"))
         fixture = fixture.replace("MODE_SOURCE", str(ROOT / "crates/horizon-client/src/game/input_mode.rs"))
         fixture = fixture.replace("METHODS", "\n".join(method(name) for name in (
             "touch_event", "touch_release_menu", "touch_keyboard_used")))
