@@ -3174,6 +3174,7 @@ impl OptionsUi {
                         *value,
                         hover || dragging,
                         true,
+                        dragging,
                     );
                 }
             }
