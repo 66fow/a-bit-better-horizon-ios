@@ -178,8 +178,8 @@ struct DownloadView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("HORIZON")
                         .font(Theme.pixel(14, .bold))
-                        .foregroundStyle(Theme.accentText)
                         .tracking(2)
+                        .foregroundStyle(Theme.accentText)
                     Text(title)
                         .font(Theme.pixel(28, .bold))
                         .foregroundStyle(Theme.text)
