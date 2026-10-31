@@ -10,7 +10,7 @@ use std::{
     fs,
     path::Path,
 };
-use winit::keyboard::KeyCode;
+use winit::{event::MouseButton, keyboard::KeyCode};
 
 use crate::keybinds;
 
@@ -139,7 +139,8 @@ pub struct Placement {
 /// A button the player added: the key it sends and how it looks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CustomButton {
-    /// The key's `key.keyboard.*` name; `None` until one is mapped (the button shows "NEW").
+    /// The `key.keyboard.*` name of a key, or a `key.mouse.*` name of a mouse button; `None` until
+    /// one is mapped (the button shows "NEW").
     pub key: Option<String>,
     /// Its top-left corner as fractions of the screen, as [`Placement`].
     pub placement: Placement,
@@ -154,6 +155,9 @@ pub const MIN_OPACITY: f32 = 0.2;
 /// How small and how large the buttons may grow.
 pub const MIN_SCALE: f32 = 0.75;
 pub const MAX_SCALE: f32 = 1.5;
+
+/// The mouse buttons a custom button can send, by the names [`keybinds::mouse_button`] reads.
+pub const MOUSE_KEYS: [&str; 2] = ["key.mouse.left", "key.mouse.right"];
 
 /// The controls the Touch Controls page lists, in layout order.
 pub const CONTROLS: [Control; 10] = [
@@ -319,7 +323,9 @@ impl TouchSettings {
                     let default = Placement { x: 0.5, y: 0.5 };
                     let key = key
                         .map(str::trim)
-                        .filter(|k| keybinds::key_code(k).is_some())
+                        .filter(|k| {
+                            keybinds::key_code(k).is_some() || keybinds::mouse_button(k).is_some()
+                        })
                         .map(str::to_owned);
                     s.buttons.insert(
                         id,
@@ -486,17 +492,28 @@ impl TouchSettings {
             button.opacity = opacity.clamp(MIN_OPACITY, 1.0);
         }
     }
-    /// What the button shows: its key's name, or "NEW" until one is mapped.
+    /// The mapping's name (`key.keyboard.*` or `key.mouse.*`), if one is set.
+    pub fn button_key_name(&self, id: u16) -> Option<&str> {
+        self.button(id)?.key.as_deref()
+    }
+    /// What the button shows: its key's name, "LMB"/"RMB" for a mouse button, or "NEW" until one is
+    /// mapped.
     pub fn button_label(&self, id: u16) -> String {
-        self.button(id)
-            .and_then(|button| button.key.as_deref())
-            .map_or_else(
-                || "NEW".to_owned(),
-                |key| keybinds::display_name(key).plain(),
-            )
+        let Some(key) = self.button_key_name(id) else {
+            return "NEW".to_owned();
+        };
+        match keybinds::mouse_button(key) {
+            Some(MouseButton::Left) => "LMB".to_owned(),
+            Some(MouseButton::Right) => "RMB".to_owned(),
+            _ => keybinds::display_name(key).plain(),
+        }
     }
     pub fn button_key_code(&self, id: u16) -> Option<KeyCode> {
-        self.button(id)?.key.as_deref().and_then(keybinds::key_code)
+        keybinds::key_code(self.button_key_name(id)?)
+    }
+    /// The mouse button the mapping sends, if it is one.
+    pub fn button_mouse(&self, id: u16) -> Option<MouseButton> {
+        keybinds::mouse_button(self.button_key_name(id)?)
     }
     /// The default positions and size; hidden buttons stay hidden and opacity stays as it is.
     pub fn reset_layout(&mut self) {
@@ -820,6 +837,23 @@ mod tests {
         // The face is the key's display name; a one-character key needs no translation table.
         s.set_button_key(id, Some("key.keyboard.f".into()));
         assert_eq!(s.button_label(id), "F");
+    }
+
+    #[test]
+    fn a_custom_button_can_send_a_mouse_click() {
+        let mut s = TouchSettings::default();
+        let id = s.add_button(600.0, 300.0);
+        s.set_button_key(id, Some("key.mouse.left".into()));
+        assert_eq!(s.button_label(id), "LMB");
+        assert_eq!(s.button_mouse(id), Some(winit::event::MouseButton::Left));
+        assert_eq!(s.button_key_code(id), None);
+        assert_eq!(TouchSettings::parse(&s.serialize()), s);
+        s.set_button_key(id, Some("key.mouse.right".into()));
+        assert_eq!(s.button_label(id), "RMB");
+        assert_eq!(TouchSettings::parse(&s.serialize()), s);
+        // A name that is neither a key nor a mouse button is still refused.
+        let bad = TouchSettings::parse("button:1:0.5,0.5:1:1:key.mouse.nope\n");
+        assert!(bad.button(1).is_some_and(|b| b.key.is_none()));
     }
 
     #[test]

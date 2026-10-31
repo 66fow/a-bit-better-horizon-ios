@@ -23,10 +23,12 @@ class TouchHandoffTests(unittest.TestCase):
 #![allow(dead_code)]
 use std::time::Instant;
 mod keybinds {
+    use winit::event::MouseButton;
     use winit::keyboard::KeyCode;
     pub struct DisplayName;
     impl DisplayName { pub fn plain(self) -> String { String::new() } }
     pub fn key_code(_: &str) -> Option<KeyCode> { None }
+    pub fn mouse_button(_: &str) -> Option<MouseButton> { None }
     pub fn display_name(_: &str) -> DisplayName { DisplayName }
 }
 #[path = "TOUCH_SOURCE"] mod touch;
@@ -123,6 +125,10 @@ fn cancelled_menu_finger_releases_without_delayed_press() {
             (folder / "fixture.rs").write_text(
                 fixture.replace("TOUCH_SOURCE", str(folder / "touch_source.rs")))
             (folder / "winit_stub.rs").write_text(
+                "pub mod event {\n"
+                "    #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n"
+                "    pub enum MouseButton { Left, Right, Middle, Back, Forward, Other(u16) }\n"
+                "}\n"
                 "pub mod keyboard {\n"
                 "    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]\n"
                 "    pub enum KeyCode { KeyA, KeyF }\n"

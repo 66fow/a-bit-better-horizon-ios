@@ -38,10 +38,17 @@ pub(super) struct TouchInput {
     /// The button a finger held still on the world is holding down: attack to mine, or use to eat, drink or
     /// draw a bow.
     holding: Option<MouseButton>,
-    /// The key each custom button sent while it is held, so its release sends the same key even if the
-    /// mapping changed meanwhile.
-    custom_keys: BTreeMap<u16, KeyCode>,
+    /// The key or mouse button each custom button sent while it is held, so its release sends the same
+    /// one even if the mapping changed meanwhile.
+    custom_keys: BTreeMap<u16, CustomKey>,
     clock: Option<Instant>,
+}
+
+/// What a custom button sends, as its mapping says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CustomKey {
+    Key(KeyCode),
+    Mouse(MouseButton),
 }
 
 /// A finger over a menu. Its press waits for a frame drawn with the pointer under it, and its release for a
@@ -346,7 +353,7 @@ impl Game<'_> {
         Ok(())
     }
 
-    /// A player's button: its mapped key, pressed and released as a keyboard would.
+    /// A player's button: its mapped key or mouse button, pressed and released as hardware would.
     fn touch_custom_key(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -354,19 +361,47 @@ impl Game<'_> {
         pressed: bool,
     ) -> Result<()> {
         if pressed {
-            if let Some(key) = self.settings.touch.button_key_code(id) {
+            if let Some(key) = self.touch_custom_mapping(id) {
                 self.touch.custom_keys.insert(id, key);
-                self.synthetic_key(event_loop, key, ElementState::Pressed)?;
+                self.touch_custom_event(event_loop, key, ElementState::Pressed)?;
             }
         } else if let Some(key) = self
             .touch
             .custom_keys
             .remove(&id)
-            .or_else(|| self.settings.touch.button_key_code(id))
+            .or_else(|| self.touch_custom_mapping(id))
         {
-            self.synthetic_key(event_loop, key, ElementState::Released)?;
+            self.touch_custom_event(event_loop, key, ElementState::Released)?;
         }
         Ok(())
+    }
+
+    /// What the player mapped `id` to: a key, or one of Minecraft's two clicks.
+    fn touch_custom_mapping(&self, id: u16) -> Option<CustomKey> {
+        let touch = &self.settings.touch;
+        if let Some(button) = touch.button_mouse(id) {
+            return Some(CustomKey::Mouse(button));
+        }
+        touch.button_key_code(id).map(CustomKey::Key)
+    }
+
+    fn touch_custom_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        key: CustomKey,
+        state: ElementState,
+    ) -> Result<()> {
+        match key {
+            CustomKey::Key(key) => self.synthetic_key(event_loop, key, state),
+            // Directly, as a tap does: a touch screen never captures the pointer, so a `MouseInput`
+            // event would be taken for a first click that only grabs and would act on nothing.
+            CustomKey::Mouse(button) => {
+                if state == ElementState::Pressed {
+                    self.touch_grab();
+                }
+                self.play_mouse(button, state == ElementState::Pressed)
+            }
+        }
     }
 
     /// A keyboard event the player's button stands for, through the same path as a real key.

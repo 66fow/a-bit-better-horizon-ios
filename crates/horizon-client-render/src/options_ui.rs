@@ -2103,7 +2103,10 @@ impl OptionsUi {
                 let Some(custom) = s.touch.button(id) else {
                     return vec![Row::Note("This button was deleted.".to_owned())];
                 };
-                let mapping = match &custom.key {
+                let mapping = match s.touch.button_key_name(id) {
+                    Some(key) if keybinds::mouse_button(key).is_some() => {
+                        Text::literal(s.touch.button_label(id))
+                    }
                     Some(key) => keybinds::display_name(key),
                     None => Text::literal("Not Set"),
                 };
@@ -2178,6 +2181,23 @@ impl OptionsUi {
                             Act::TouchClearKey(id),
                         ),
                         None,
+                    ),
+                    // Minecraft's two clicks: attack/destroy and use/place.
+                    Row::Buttons(
+                        button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            Text::literal("Left Click"),
+                            Act::TouchSetKey(id, crate::touch::MOUSE_KEYS[0]),
+                        ),
+                        Some(button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            Text::literal("Right Click"),
+                            Act::TouchSetKey(id, crate::touch::MOUSE_KEYS[1]),
+                        )),
                     ),
                 ];
                 for chunk in keybinds::all_keys().chunks(2) {
@@ -4416,6 +4436,84 @@ mod tests {
             s.touch.button_label(id),
             keybinds::display_name(name).plain()
         );
+    }
+
+    #[test]
+    fn a_button_can_be_bound_to_a_mouse_click() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let id = s.touch.add_button(480.0, 480.0);
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::TouchOptions(id));
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let map = widgets
+            .iter()
+            .find(|w| {
+                matches!(
+                    &w.kind,
+                    WKind::Button {
+                        act: Act::Push(Page::TouchKey(k)),
+                        ..
+                    } if *k == id
+                )
+            })
+            .expect("the options page opens the key picker");
+        ui.click(
+            &mut s,
+            &atlas,
+            map.x + 2.0,
+            map.y + 2.0,
+            size,
+            [480, 480],
+            false,
+            false,
+        );
+        assert_eq!(ui.page(), Page::TouchKey(id));
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let click = widgets
+            .iter()
+            .find(|w| {
+                matches!(
+                    &w.kind,
+                    WKind::Button {
+                        act: Act::TouchSetKey(k, "key.mouse.left"),
+                        ..
+                    } if *k == id
+                )
+            })
+            .expect("the picker lists the left click");
+        let events = ui.click(
+            &mut s,
+            &atlas,
+            click.x + 2.0,
+            click.y + 2.0,
+            size,
+            [480, 480],
+            false,
+            false,
+        );
+        assert!(events.contains(&Event::Changed));
+        assert_eq!(ui.page(), Page::TouchOptions(id));
+        assert_eq!(s.touch.button_label(id), "LMB");
+        assert_eq!(
+            s.touch.button_mouse(id),
+            Some(winit::event::MouseButton::Left)
+        );
+        // And the options page names it the same way.
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let mapping = widgets
+            .iter()
+            .find_map(|w| match &w.kind {
+                WKind::Button {
+                    label,
+                    act: Act::Push(Page::TouchKey(k)),
+                    ..
+                } if *k == id => Some(label),
+                _ => None,
+            })
+            .expect("the options page lists the mapping");
+        assert_eq!(mapping.plain(), "Mapping Key: LMB");
     }
 
     #[test]
