@@ -256,6 +256,10 @@ const KEYS: &[(&str, KeyCode)] = &[
     ("key.keyboard.right.alt", KeyCode::AltRight),
     ("key.keyboard.right.win", KeyCode::SuperRight),
 ];
+/// Every keyboard key with its InputConstants name, for a key picker.
+pub fn all_keys() -> &'static [(&'static str, KeyCode)] {
+    KEYS
+}
 pub fn key_code(name: &str) -> Option<KeyCode> {
     KEYS.iter().find(|(n, _)| *n == name).map(|(_, k)| *k)
 }
@@ -546,5 +550,17 @@ mod tests {
     fn display_names() {
         assert_eq!(display_name("key.keyboard.w").plain(), "W");
         assert_eq!(display_name("key.keyboard.slash").plain(), "/");
+    }
+    #[test]
+    fn the_key_table_lists_every_key_once() {
+        let keys = all_keys();
+        assert!(keys.contains(&("key.keyboard.f3", KeyCode::F3)));
+        let mut names: Vec<_> = keys.iter().map(|(n, _)| *n).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), keys.len());
+        for (name, _) in keys {
+            assert_eq!(key_name(key_code(name).unwrap()), Some(*name));
+        }
     }
 }

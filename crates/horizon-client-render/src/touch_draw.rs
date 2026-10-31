@@ -2,6 +2,7 @@
 //! preview, so the settings show exactly what a finger will press.
 use crate::{
     hud::{HudAtlas, HudBatch, rgba},
+    text::Text,
     touch::{Control, Rect},
 };
 
@@ -16,6 +17,27 @@ pub fn draw_control(
 ) {
     draw_button(batch, atlas, r, held, opacity);
     shadowed(r, |r, color| glyph(batch, atlas, control, r, color));
+}
+
+/// A player's button: vanilla's button behind the name of its key ("NEW" until mapped).
+pub fn draw_custom(
+    batch: &mut HudBatch,
+    atlas: &HudAtlas,
+    label: &str,
+    r: Rect,
+    held: bool,
+    opacity: f32,
+) {
+    draw_button(batch, atlas, r, held, opacity);
+    crate::ui::centered_text(
+        batch,
+        atlas,
+        &Text::literal(label),
+        r[0] + 2.0,
+        r[1] + ((r[3] - 8.0) / 2.0).floor(),
+        r[2] - 4.0,
+        rgba(255, 255, 255, 255),
+    );
 }
 
 /// Vanilla's button sprite, nine-sliced to the touch button's size: highlighted while held, and see-through
@@ -114,6 +136,6 @@ fn glyph(batch: &mut HudBatch, atlas: &HudAtlas, control: Control, r: Rect, colo
                 cell(batch, x, -0.5, 1.0, 1.0);
             }
         }
-        Control::Hotbar(_) => {}
+        Control::Hotbar(_) | Control::Custom(_) => {}
     }
 }

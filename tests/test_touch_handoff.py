@@ -22,6 +22,13 @@ class TouchHandoffTests(unittest.TestCase):
         fixture = r'''
 #![allow(dead_code)]
 use std::time::Instant;
+mod keybinds {
+    use winit::keyboard::KeyCode;
+    pub struct DisplayName;
+    impl DisplayName { pub fn plain(self) -> String { String::new() } }
+    pub fn key_code(_: &str) -> Option<KeyCode> { None }
+    pub fn display_name(_: &str) -> DisplayName { DisplayName }
+}
 #[path = "TOUCH_SOURCE"] mod touch;
 #[path = "MODE_SOURCE"] mod input_mode;
 use touch::{Control, Out, Touches};
@@ -54,7 +61,7 @@ impl Game {
     fn touch_playing(&self) -> bool { self.playing }
     fn touch_menu(&mut self, _: &ActiveEventLoop, _: u64, _: TouchPhase, _: (f32,f32)) { self.menu_calls += 1; }
     fn touch_button(&mut self, _: &ActiveEventLoop, down: bool) { self.buttons.push(down); }
-    fn touch_act(&mut self, actions: Vec<Out>, _: f32) -> Result<()> { self.actions.extend(actions); Ok(()) }
+    fn touch_act(&mut self, _: &ActiveEventLoop, actions: Vec<Out>, _: f32) -> Result<()> { self.actions.extend(actions); Ok(()) }
 METHODS
 }
 fn event(id: u64, phase: TouchPhase, at: (f32,f32)) -> Touch {
@@ -104,14 +111,29 @@ fn cancelled_menu_finger_releases_without_delayed_press() {
     }
 }
 '''
-        fixture = fixture.replace("TOUCH_SOURCE", str(ROOT / "crates/horizon-client-render/src/touch.rs"))
+        # The module's own unit tests need the real keybinds table; the dispatcher does not.
+        touch_source = (ROOT / "crates/horizon-client-render/src/touch.rs").read_text()
+        touch_source = touch_source.split("\n#[cfg(test)]", 1)[0] + "\n"
         fixture = fixture.replace("MODE_SOURCE", str(ROOT / "crates/horizon-client/src/game/input_mode.rs"))
         fixture = fixture.replace("METHODS", "\n".join(method(name) for name in (
             "touch_event", "touch_release_menu", "touch_keyboard_used")))
         with tempfile.TemporaryDirectory(prefix="horizon-touch-handoff-") as folder:
             folder = Path(folder)
-            (folder / "fixture.rs").write_text(fixture)
+            (folder / "touch_source.rs").write_text(touch_source)
+            (folder / "fixture.rs").write_text(
+                fixture.replace("TOUCH_SOURCE", str(folder / "touch_source.rs")))
+            (folder / "winit_stub.rs").write_text(
+                "pub mod keyboard {\n"
+                "    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]\n"
+                "    pub enum KeyCode { KeyA, KeyF }\n"
+                "}\n")
+            stub = subprocess.run(["rustc", "--edition=2024", "--crate-type", "lib",
+                                   "--crate-name", "winit", str(folder / "winit_stub.rs"),
+                                   "-o", str(folder / "libwinit.rlib")],
+                                  capture_output=True, text=True)
+            self.assertEqual(stub.returncode, 0, stub.stdout + stub.stderr)
             build = subprocess.run(["rustc", "--edition=2024", "--test", str(folder / "fixture.rs"),
+                                    "--extern", f"winit={folder / 'libwinit.rlib'}",
                                     "-o", str(folder / "probe")], capture_output=True, text=True)
             self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
             run = subprocess.run([str(folder / "probe")], capture_output=True, text=True)

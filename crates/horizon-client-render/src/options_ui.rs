@@ -34,6 +34,19 @@ fn percent(caption: &str, value: f32) -> Text {
 fn on_off(v: bool) -> Text {
     tr(if v { "options.on" } else { "options.off" })
 }
+/// A player's touch button's slider position (0..1) as its setting, stepped as the overlay's are.
+fn set_touch_slider(s: &mut Settings, id: u16, field: TouchField, v: f32) {
+    let v = v.clamp(0.0, 1.0);
+    let (lo, hi) = match field {
+        TouchField::Scale => (crate::touch::MIN_SCALE, crate::touch::MAX_SCALE),
+        TouchField::Opacity => (crate::touch::MIN_OPACITY, 1.0),
+    };
+    let value = ((lo + v * (hi - lo)) * 100.0).round() / 100.0;
+    match field {
+        TouchField::Scale => s.touch.set_button_scale(id, value),
+        TouchField::Opacity => s.touch.set_button_opacity(id, value),
+    }
+}
 fn chat_px(caption: &str, px: f32) -> Text {
     Text::translate(
         "options.pixel_value",
@@ -1045,6 +1058,10 @@ pub enum Page {
     Touch,
     /// The touch overlay's drag-and-drop editor.
     TouchLayout,
+    /// A player's own touch button's options: its id in `touch.buttons`.
+    TouchOptions(u16),
+    /// Choosing the key a player's own touch button sends: its id.
+    TouchKey(u16),
     Extras,
     /// CreditsAndAttributionScreen.
     Credits,
@@ -1087,6 +1104,11 @@ enum Act {
     CopyAgentDetails,
     /// Put the touch overlay's buttons back in their default places.
     TouchReset,
+    /// A player's own touch button: add one, map its key, clear its key (the Options/Delete popup is
+    /// handled where it is drawn).
+    TouchAdd,
+    TouchSetKey(u16, &'static str),
+    TouchClearKey(u16),
 }
 enum WKind {
     Button {
@@ -1111,6 +1133,19 @@ enum WKind {
     },
     /// A touch button where the overlay puts it: dragged on the Touch Controls editor.
     TouchControl(crate::touch::Control),
+    /// A player's own touch button's size or opacity, on its options page.
+    TouchSlider {
+        id: u16,
+        field: TouchField,
+        label: Text,
+        value: f32,
+    },
+}
+/// Which setting a [`WKind::TouchSlider`] sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TouchField {
+    Scale,
+    Opacity,
 }
 struct Widget {
     x: f32,
@@ -1182,6 +1217,12 @@ pub struct OptionsUi {
     /// The Touch Controls editor: the button being dragged and how far the pointer was from its top-left
     /// corner when it went down (GUI pixels).
     pub(crate) dragging_touch: Option<(crate::touch::Control, (f32, f32))>,
+    /// The Touch Controls editor: the button a pointer went down on and where, for a long press.
+    touch_press: Option<(crate::touch::Control, (f32, f32), Instant)>,
+    /// The player's own touch button whose Options/Delete popup is open.
+    touch_popup: Option<u16>,
+    /// The player's own touch button's slider being dragged during a frame (it saves on release).
+    dragging_custom: Option<(u16, TouchField)>,
     /// The pressed slider's own position (`AbstractSliderButton.value`) and
     /// when it last moved: the handle follows the pointer while the option
     /// keeps its stepped value, then snaps to it (`resetValue`).
@@ -1235,6 +1276,9 @@ impl Default for OptionsUi {
             scroll: 0.0,
             dragging: None,
             dragging_touch: None,
+            touch_press: None,
+            touch_popup: None,
+            dragging_custom: None,
             slider_value: None,
             scrollbar_drag_y: None,
             selected_key: None,
@@ -1436,12 +1480,18 @@ impl OptionsUi {
         self.push(page);
         self.in_world = in_world;
         self.selected_key = None;
+        self.touch_press = None;
+        self.touch_popup = None;
+        self.dragging_custom = None;
     }
     fn push(&mut self, page: Page) {
         self.stack.push(page);
         self.scroll = 0.0;
         self.scrollbar_drag_y = None;
         self.dragging_touch = None;
+        self.touch_press = None;
+        self.touch_popup = None;
+        self.dragging_custom = None;
         if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
             self.settings_search.set_value("");
             self.settings_search.focused = false;
@@ -1492,6 +1542,8 @@ impl OptionsUi {
             Page::Controller => "Controller Settings",
             Page::PadBinds => "Controller Binds",
             Page::Touch | Page::TouchLayout => "Touch Controls",
+            Page::TouchOptions(_) => "Button Options",
+            Page::TouchKey(_) => "Choose Key",
             Page::Extras => "Horizon Extras",
             Page::Credits => "credits_and_attribution.screen.title",
             Page::Horizon => "Horizon Settings",
@@ -1581,6 +1633,31 @@ impl OptionsUi {
             rows.push(Row::Buttons(widget, None));
         }
         rows
+    }
+
+    /// The Touch Controls editor's popup beside a player's button: (panel, Options, Delete), in GUI pixels.
+    fn touch_popup_rects(
+        &self,
+        widgets: &[Widget],
+        size: (f32, f32),
+    ) -> Option<([f32; 4], [f32; 4], [f32; 4])> {
+        let id = self.touch_popup?;
+        let wd = widgets.iter().find(|wd| {
+            matches!(&wd.kind, WKind::TouchControl(crate::touch::Control::Custom(c)) if *c == id)
+        })?;
+        let (w, h) = size;
+        let (pw, ph) = (74.0, 46.0);
+        let x = if wd.x + wd.w + 4.0 + pw <= w {
+            wd.x + wd.w + 4.0
+        } else {
+            (wd.x - 4.0 - pw).max(0.0)
+        };
+        let y = wd.y.clamp(0.0, (h - ph).max(0.0));
+        Some((
+            [x, y, pw, ph],
+            [x + 2.0, y + 2.0, pw - 4.0, 20.0],
+            [x + 2.0, y + 24.0, pw - 4.0, 20.0],
+        ))
     }
 
     fn list_rows(&self, s: &Settings) -> Vec<Row> {
@@ -1835,6 +1912,108 @@ impl OptionsUi {
                     .map(Opt::TouchShow)
                     .collect();
                 rows.extend(pairs(&shown));
+                rows
+            }
+            Page::TouchOptions(id) => {
+                let Some(custom) = s.touch.button(id) else {
+                    return vec![Row::Note("This button was deleted.".to_owned())];
+                };
+                let mapping = match &custom.key {
+                    Some(key) => keybinds::display_name(key),
+                    None => Text::literal("Not Set"),
+                };
+                let slider = |field, label: Text, value: f32| Widget {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 310.0,
+                    h: 20.0,
+                    kind: WKind::TouchSlider {
+                        id,
+                        field,
+                        label,
+                        value,
+                    },
+                    list: false,
+                };
+                vec![
+                    Row::Note(format!("Button: {}", s.touch.button_label(id))),
+                    Row::Buttons(
+                        button(
+                            0.0,
+                            0.0,
+                            310.0,
+                            Text::literal("Mapping Key: ").append(mapping),
+                            Act::Push(Page::TouchKey(id)),
+                        ),
+                        None,
+                    ),
+                    Row::Buttons(
+                        slider(
+                            TouchField::Scale,
+                            Text::literal(format!(
+                                "Size: {}%",
+                                (custom.scale * 100.0).round() as i32
+                            )),
+                            ((custom.scale - crate::touch::MIN_SCALE)
+                                / (crate::touch::MAX_SCALE - crate::touch::MIN_SCALE))
+                                .clamp(0.0, 1.0),
+                        ),
+                        None,
+                    ),
+                    Row::Buttons(
+                        slider(
+                            TouchField::Opacity,
+                            Text::literal(format!(
+                                "Opacity: {}%",
+                                (custom.opacity * 100.0).round() as i32
+                            )),
+                            ((custom.opacity - crate::touch::MIN_OPACITY)
+                                / (1.0 - crate::touch::MIN_OPACITY))
+                                .clamp(0.0, 1.0),
+                        ),
+                        None,
+                    ),
+                ]
+            }
+            Page::TouchKey(id) => {
+                if s.touch.button(id).is_none() {
+                    return vec![Row::Note("This button was deleted.".to_owned())];
+                }
+                let mut rows = vec![
+                    Row::Note(format!(
+                        "Choose the key \"{}\" sends.",
+                        s.touch.button_label(id)
+                    )),
+                    Row::Buttons(
+                        button(
+                            0.0,
+                            0.0,
+                            310.0,
+                            Text::literal("Clear Key"),
+                            Act::TouchClearKey(id),
+                        ),
+                        None,
+                    ),
+                ];
+                for chunk in keybinds::all_keys().chunks(2) {
+                    let one = button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        keybinds::display_name(chunk[0].0),
+                        Act::TouchSetKey(id, chunk[0].0),
+                    );
+                    let two = chunk.get(1).map(|(name, _)| {
+                        button(
+                            0.0,
+                            0.0,
+                            150.0,
+                            keybinds::display_name(name),
+                            Act::TouchSetKey(id, name),
+                        )
+                    });
+                    rows.push(Row::Buttons(one, two));
+                }
                 rows
             }
             Page::Controller => {
@@ -2290,6 +2469,7 @@ impl OptionsUi {
                     tr("controls.reset"),
                     Act::TouchReset,
                 ));
+                out.push(button(68.0, 4.0, 60.0, Text::literal("Add"), Act::TouchAdd));
                 out.push(button(w - 64.0, 4.0, 60.0, tr("gui.done"), Act::Done));
                 for (control, r) in s.touch.layout(w, h) {
                     if matches!(control, crate::touch::Control::Hotbar(_)) {
@@ -2569,6 +2749,18 @@ impl OptionsUi {
             return;
         }
         let (widgets, top, bottom, content) = self.layout(s, w, h);
+        if self.page() == Page::TouchLayout
+            && let Some((control, _, since)) = self.touch_press
+            && since.elapsed().as_millis() >= 500
+        {
+            self.touch_press = None;
+            if let crate::touch::Control::Custom(id) = control
+                && self.dragging_touch.is_some_and(|(c, _)| c == control)
+            {
+                self.touch_popup = Some(id);
+                self.dragging_touch = None;
+            }
+        }
         let in_world = self.in_world;
         ui::menu_background(batch, atlas, 0.0, 0.0, w, h, in_world);
         let list = bottom > top;
@@ -2743,18 +2935,77 @@ impl OptionsUi {
                         .dragging_touch
                         .as_ref()
                         .is_some_and(|(c, _)| c == control);
-                    crate::touch_draw::draw_control(
+                    let rect = [wd.x, wd.y, wd.w, wd.h];
+                    if let crate::touch::Control::Custom(id) = control {
+                        let own = s.touch.button(*id).map_or(1.0, |b| b.opacity);
+                        crate::touch_draw::draw_custom(
+                            batch,
+                            atlas,
+                            &s.touch.button_label(*id),
+                            rect,
+                            held,
+                            s.touch.opacity * own,
+                        );
+                    } else {
+                        crate::touch_draw::draw_control(
+                            batch,
+                            atlas,
+                            *control,
+                            rect,
+                            held,
+                            s.touch.opacity,
+                        );
+                    }
+                }
+                WKind::TouchSlider {
+                    id,
+                    field,
+                    label,
+                    value,
+                } => {
+                    let dragging = self.dragging_custom == Some((*id, *field));
+                    ui::slider(
                         batch,
                         atlas,
-                        *control,
-                        [wd.x, wd.y, wd.w, wd.h],
-                        held,
-                        s.touch.opacity,
+                        wd.x,
+                        wd.y,
+                        wd.w,
+                        label,
+                        *value,
+                        hover || dragging,
+                        true,
                     );
                 }
             }
             if wd.list && (wd.y < top || wd.y + wd.h > bottom) {
                 batch.clip_since(start, 0.0, top, w, bottom);
+            }
+        }
+        if self.page() == Page::TouchLayout
+            && let Some((panel, options, delete)) = self.touch_popup_rects(&widgets, (w, h))
+        {
+            batch.fill(atlas, panel[0], panel[1], panel[2], panel[3], u32::MAX);
+            batch.fill(
+                atlas,
+                panel[0] + 1.0,
+                panel[1] + 1.0,
+                panel[2] - 2.0,
+                panel[3] - 2.0,
+                rgba(0, 0, 0, 230),
+            );
+            for (rect, label) in [(options, "Options"), (delete, "Delete")] {
+                let hover = ui::hovered(cursor, rect[0], rect[1], rect[2], rect[3]);
+                ui::button(
+                    batch,
+                    atlas,
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    &Text::literal(label),
+                    true,
+                    hover,
+                );
             }
         }
         if list {
@@ -2905,6 +3156,13 @@ impl OptionsUi {
             }
         }
         if drag {
+            // Moving past the slop turns the editor's press into a drag, not a long press.
+            if self
+                .touch_press
+                .is_some_and(|(_, (sx, sy), _)| (x - sx).hypot(y - sy) > 8.0)
+            {
+                self.touch_press = None;
+            }
             if let Some((control, grab)) = self.dragging_touch {
                 if let Some(wd) = widgets
                     .iter()
@@ -2943,6 +3201,41 @@ impl OptionsUi {
                 self.slider_value = Some((opt, v, Instant::now()));
                 set_slider(opt, s, v);
                 events.push(Event::SliderDrag);
+            }
+            if let Some((id, field)) = self.dragging_custom
+                && let Some(wd) = widgets.iter().find(|wd| {
+                    matches!(
+                        &wd.kind,
+                        WKind::TouchSlider {
+                            id: i,
+                            field: f,
+                            ..
+                        } if *i == id && *f == field
+                    )
+                })
+            {
+                set_touch_slider(s, id, field, ui::slider_value(wd.x, wd.w, x));
+                events.push(Event::SliderDrag);
+            }
+            return events;
+        }
+        if self.page() == Page::TouchLayout && self.touch_popup.is_some() {
+            let rects = self.touch_popup_rects(&widgets, size);
+            if let Some((_, options, _)) = rects
+                && ui::hovered((x, y), options[0], options[1], options[2], options[3])
+            {
+                let id = self.touch_popup.take().unwrap_or_default();
+                events.push(Event::ButtonClick);
+                self.push(Page::TouchOptions(id));
+            } else if let Some((_, _, delete)) = rects
+                && ui::hovered((x, y), delete[0], delete[1], delete[2], delete[3])
+            {
+                let id = self.touch_popup.take().unwrap_or_default();
+                s.touch.remove_button(id);
+                events.push(Event::ButtonClick);
+                events.push(Event::Changed);
+            } else {
+                self.touch_popup = None;
             }
             return events;
         }
@@ -3071,6 +3364,18 @@ impl OptionsUi {
                             s.touch.reset_layout();
                             events.push(Event::Changed);
                         }
+                        Act::TouchAdd => {
+                            s.touch.add_button(size.0, size.1);
+                            events.push(Event::Changed);
+                        }
+                        Act::TouchSetKey(id, name) => {
+                            s.touch.set_button_key(id, Some(name.to_owned()));
+                            events.extend(self.back(s));
+                        }
+                        Act::TouchClearKey(id) => {
+                            s.touch.set_button_key(id, None);
+                            events.extend(self.back(s));
+                        }
                         Act::None => {}
                     }
                 }
@@ -3090,7 +3395,13 @@ impl OptionsUi {
                 }
                 WKind::TouchControl(control) => {
                     self.dragging_touch = Some((control, (x - wd.x, y - wd.y)));
+                    self.touch_press = Some((control, (x, y), Instant::now()));
                     events.push(Event::ButtonClick);
+                }
+                WKind::TouchSlider { id, field, .. } => {
+                    self.dragging_custom = Some((id, field));
+                    set_touch_slider(s, id, field, ui::slider_value(wd.x, wd.w, x));
+                    events.push(Event::SliderDrag);
                 }
                 _ => {}
             }
@@ -3124,6 +3435,12 @@ impl OptionsUi {
         if self.dragging_touch.take().is_some() {
             events.push(Event::Changed);
         }
+        // A player's button slider also saves on release, even if the pointer left it.
+        if self.dragging_custom.take().is_some() {
+            events.push(Event::ButtonClick);
+            events.push(Event::Changed);
+        }
+        self.touch_press = None;
         events
     }
     pub fn scroll(&mut self, s: &Settings, size: (f32, f32), amount: f32) {
@@ -3179,6 +3496,10 @@ impl OptionsUi {
     }
     /// Escape or Done: leave the current page, applying page results.
     pub fn back(&mut self, s: &mut Settings) -> Vec<Event> {
+        // The editor's popup closes first, before the page under it.
+        if self.touch_popup.take().is_some() {
+            return Vec::new();
+        }
         let mut events = Vec::new();
         let page = self.stack.pop().unwrap_or(Page::Main);
         self.scroll = 0.0;
@@ -3186,6 +3507,8 @@ impl OptionsUi {
         self.dragging = None;
         self.slider_value = None;
         self.dragging_touch = None;
+        self.touch_press = None;
+        self.dragging_custom = None;
         self.selected_key = None;
         self.selected_pad_action = None;
         match page {
@@ -3585,6 +3908,272 @@ mod tests {
         assert_eq!(ui.release(), vec![Event::Changed]);
         let placed = s.touch.placements[&Control::Jump];
         assert!(placed.x < 0.1 && placed.y < 0.1);
+    }
+
+    #[test]
+    fn the_editor_adds_a_centred_new_button() {
+        use crate::touch::Control;
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::TouchLayout);
+        let add = ui
+            .layout(&s, size.0, size.1)
+            .0
+            .into_iter()
+            .find(|w| {
+                matches!(
+                    w.kind,
+                    WKind::Button {
+                        act: Act::TouchAdd,
+                        ..
+                    }
+                )
+            })
+            .expect("the editor has an Add button");
+        assert_eq!(
+            ui.click(
+                &mut s,
+                &atlas,
+                add.x + 2.0,
+                add.y + 2.0,
+                size,
+                [480, 480],
+                false,
+                false
+            ),
+            vec![Event::ButtonClick, Event::Changed]
+        );
+        let id = *s.touch.buttons.keys().next().expect("a button was added");
+        assert_eq!(s.touch.button_label(id), "NEW");
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let wd = widgets
+            .iter()
+            .find(|w| matches!(w.kind, WKind::TouchControl(Control::Custom(c)) if c == id))
+            .expect("the editor draws the new button");
+        assert!(((wd.x + wd.w / 2.0) - size.0 / 2.0).abs() < 2.0);
+        assert!(((wd.y + wd.h / 2.0) - size.1 / 2.0).abs() < 2.0);
+    }
+
+    #[test]
+    fn a_long_press_offers_options_and_delete() {
+        use crate::touch::Control;
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let id = s.touch.add_button(480.0, 480.0);
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::TouchLayout);
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let wd = widgets
+            .iter()
+            .find(|w| matches!(w.kind, WKind::TouchControl(Control::Custom(c)) if c == id))
+            .unwrap();
+        let (px, py) = (wd.x + wd.w / 2.0, wd.y + wd.h / 2.0);
+        ui.click(&mut s, &atlas, px, py, size, [480, 480], false, false);
+        assert!(ui.dragging_touch.is_some());
+        // Held still for longer than the 500 ms threshold.
+        ui.touch_press = Some((
+            Control::Custom(id),
+            (px, py),
+            Instant::now() - std::time::Duration::from_secs(1),
+        ));
+        let mut batch = HudBatch::new([480, 480]);
+        ui.draw(&s, &mut batch, &atlas, (px, py));
+        assert_eq!(ui.touch_popup, Some(id));
+        assert!(ui.dragging_touch.is_none());
+        // Options opens the button's page.
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let (_, options, _) = ui.touch_popup_rects(&widgets, size).unwrap();
+        assert_eq!(
+            ui.click(
+                &mut s,
+                &atlas,
+                options[0] + 2.0,
+                options[1] + 2.0,
+                size,
+                [480, 480],
+                false,
+                false
+            ),
+            vec![Event::ButtonClick]
+        );
+        assert_eq!(ui.page(), Page::TouchOptions(id));
+        assert_eq!(ui.touch_popup, None);
+        // Delete removes the button (the popup reopened from the editor).
+        ui.back(&mut s);
+        ui.touch_popup = Some(id);
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let (_, _, delete) = ui.touch_popup_rects(&widgets, size).unwrap();
+        assert_eq!(
+            ui.click(
+                &mut s,
+                &atlas,
+                delete[0] + 2.0,
+                delete[1] + 2.0,
+                size,
+                [480, 480],
+                false,
+                false
+            ),
+            vec![Event::ButtonClick, Event::Changed]
+        );
+        assert!(s.touch.button(id).is_none());
+        assert_eq!(ui.touch_popup, None);
+        // A drag past the slop cancels the long press.
+        let other = s.touch.add_button(480.0, 480.0);
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let wd = widgets
+            .iter()
+            .find(|w| matches!(w.kind, WKind::TouchControl(Control::Custom(c)) if c == other))
+            .unwrap();
+        let (px, py) = (wd.x + wd.w / 2.0, wd.y + wd.h / 2.0);
+        ui.click(&mut s, &atlas, px, py, size, [480, 480], false, false);
+        ui.click(
+            &mut s,
+            &atlas,
+            px + 30.0,
+            py + 30.0,
+            size,
+            [480, 480],
+            true,
+            false,
+        );
+        assert!(ui.touch_press.is_none());
+    }
+
+    #[test]
+    fn choosing_a_key_maps_the_button_and_returns() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let id = s.touch.add_button(480.0, 480.0);
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::TouchOptions(id));
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let map = widgets
+            .iter()
+            .find(|w| {
+                matches!(
+                    w.kind,
+                    WKind::Button {
+                        act: Act::Push(Page::TouchKey(k)),
+                        ..
+                    } if k == id
+                )
+            })
+            .expect("the options page opens the key picker");
+        ui.click(
+            &mut s,
+            &atlas,
+            map.x + 2.0,
+            map.y + 2.0,
+            size,
+            [480, 480],
+            false,
+            false,
+        );
+        assert_eq!(ui.page(), Page::TouchKey(id));
+        let (name, _) = keybinds::all_keys()[0];
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let key = widgets
+            .iter()
+            .find(|w| {
+                matches!(
+                    &w.kind,
+                    WKind::Button {
+                        act: Act::TouchSetKey(k, n),
+                        ..
+                    } if *k == id && *n == name
+                )
+            })
+            .expect("the picker lists every key");
+        let events = ui.click(
+            &mut s,
+            &atlas,
+            key.x + 2.0,
+            key.y + 2.0,
+            size,
+            [480, 480],
+            false,
+            false,
+        );
+        assert!(events.contains(&Event::Changed));
+        assert_eq!(ui.page(), Page::TouchOptions(id));
+        assert_eq!(
+            s.touch.button_label(id),
+            keybinds::display_name(name).plain()
+        );
+    }
+
+    #[test]
+    fn a_buttons_sliders_change_its_size_and_opacity() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let id = s.touch.add_button(480.0, 480.0);
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::TouchOptions(id));
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let scale = widgets
+            .iter()
+            .find(|w| {
+                matches!(
+                    w.kind,
+                    WKind::TouchSlider {
+                        id: i,
+                        field: TouchField::Scale,
+                        ..
+                    } if i == id
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            ui.click(
+                &mut s,
+                &atlas,
+                scale.x + scale.w - 1.0,
+                scale.y + 4.0,
+                size,
+                [480, 480],
+                false,
+                false
+            ),
+            vec![Event::SliderDrag]
+        );
+        assert_eq!(s.touch.button(id).unwrap().scale, crate::touch::MAX_SCALE);
+        let events = ui.release();
+        assert!(events.contains(&Event::ButtonClick) && events.contains(&Event::Changed));
+        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
+        let opacity = widgets
+            .iter()
+            .find(|w| {
+                matches!(
+                    w.kind,
+                    WKind::TouchSlider {
+                        id: i,
+                        field: TouchField::Opacity,
+                        ..
+                    } if i == id
+                )
+            })
+            .unwrap();
+        ui.click(
+            &mut s,
+            &atlas,
+            opacity.x + 4.0,
+            opacity.y + 4.0,
+            size,
+            [480, 480],
+            false,
+            false,
+        );
+        assert_eq!(
+            s.touch.button(id).unwrap().opacity,
+            crate::touch::MIN_OPACITY
+        );
+        ui.release();
     }
 
     fn atlas() -> HudAtlas {

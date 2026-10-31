@@ -10,6 +10,9 @@ use std::{
     fs,
     path::Path,
 };
+use winit::keyboard::KeyCode;
+
+use crate::keybinds;
 
 /// A button of the layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,6 +29,8 @@ pub enum Control {
     Pause,
     Inventory,
     Hotbar(u8),
+    /// A button the player added, by its id in [`TouchSettings::buttons`].
+    Custom(u16),
 }
 
 impl Control {
@@ -131,6 +136,19 @@ pub struct Placement {
     pub y: f32,
 }
 
+/// A button the player added: the key it sends and how it looks.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CustomButton {
+    /// The key's `key.keyboard.*` name; `None` until one is mapped (the button shows "NEW").
+    pub key: Option<String>,
+    /// Its top-left corner as fractions of the screen, as [`Placement`].
+    pub placement: Placement,
+    /// Its own size, `MIN_SCALE`..=`MAX_SCALE`, multiplied by the overlay's scale.
+    pub scale: f32,
+    /// Its own background opacity, `MIN_OPACITY`..=1.0, multiplied by the overlay's.
+    pub opacity: f32,
+}
+
 /// How see-through the button backgrounds may become.
 pub const MIN_OPACITY: f32 = 0.2;
 /// How small and how large the buttons may grow.
@@ -164,7 +182,7 @@ pub fn control_name(control: Control) -> Option<&'static str> {
         Control::Chat => "chat",
         Control::Pause => "pause",
         Control::Inventory => "inventory",
-        Control::Hotbar(_) => return None,
+        Control::Hotbar(_) | Control::Custom(_) => return None,
     })
 }
 
@@ -198,6 +216,7 @@ pub fn control_caption(control: Control) -> &'static str {
         Control::Pause => "horizon.options.touch.pause",
         Control::Inventory => "horizon.options.touch.inventory",
         Control::Hotbar(_) => "horizon.options.touch.hotbar",
+        Control::Custom(_) => "horizon.options.touch.custom",
     }
 }
 
@@ -212,6 +231,8 @@ pub struct TouchSettings {
     pub placements: BTreeMap<Control, Placement>,
     /// Buttons the player turned off. The pause button is never hidden: a phone needs a way back.
     pub hidden: BTreeSet<Control>,
+    /// The player's own buttons, by id.
+    pub buttons: BTreeMap<u16, CustomButton>,
 }
 
 impl Default for TouchSettings {
@@ -221,6 +242,7 @@ impl Default for TouchSettings {
             scale: 1.0,
             placements: BTreeMap::new(),
             hidden: BTreeSet::new(),
+            buttons: BTreeMap::new(),
         }
     }
 }
@@ -277,6 +299,41 @@ impl TouchSettings {
                         s.placements.insert(control, placement);
                     }
                 }
+                // `button:<id>:x,y:scale:opacity:key`, as `serialize` writes it. An
+                // empty key is a button that has none yet ("NEW").
+                "button" => {
+                    let mut parts = value.splitn(5, ':');
+                    let (Some(id), Some(xy), Some(scale), Some(opacity), key) = (
+                        parts.next(),
+                        parts.next(),
+                        parts.next(),
+                        parts.next(),
+                        parts.next(),
+                    ) else {
+                        continue;
+                    };
+                    let (Ok(id), Some((x, y))) = (id.trim().parse::<u16>(), xy.split_once(','))
+                    else {
+                        continue;
+                    };
+                    let default = Placement { x: 0.5, y: 0.5 };
+                    let key = key
+                        .map(str::trim)
+                        .filter(|k| keybinds::key_code(k).is_some())
+                        .map(str::to_owned);
+                    s.buttons.insert(
+                        id,
+                        CustomButton {
+                            key,
+                            placement: Placement {
+                                x: clamp_unit(x.trim(), default.x, 0.0, 1.0),
+                                y: clamp_unit(y.trim(), default.y, 0.0, 1.0),
+                            },
+                            scale: clamp_unit(scale, 1.0, MIN_SCALE, MAX_SCALE),
+                            opacity: clamp_unit(opacity, 1.0, MIN_OPACITY, 1.0),
+                        },
+                    );
+                }
                 _ => {}
             }
         }
@@ -293,6 +350,16 @@ impl TouchSettings {
             if let Some(name) = control_name(*control) {
                 text.push_str(&format!("hidden:{name}\n"));
             }
+        }
+        for (id, button) in &self.buttons {
+            text.push_str(&format!(
+                "button:{id}:{},{}:{}:{}:{}\n",
+                button.placement.x,
+                button.placement.y,
+                button.scale,
+                button.opacity,
+                button.key.as_deref().unwrap_or("")
+            ));
         }
         text
     }
@@ -318,13 +385,37 @@ impl TouchSettings {
                 bh,
             ];
         }
+        // The player's buttons, after the built-in ones: each its own size.
+        let base = button_size(h);
+        for (id, button) in &self.buttons {
+            let size = (base * scale * button.scale.clamp(MIN_SCALE, MAX_SCALE))
+                .round()
+                .max(1.0);
+            let x = button.placement.x * w;
+            let y = button.placement.y * h;
+            v.push((
+                Control::Custom(*id),
+                [
+                    x.clamp(0.0, (w - size).max(0.0)),
+                    y.clamp(0.0, (h - size).max(0.0)),
+                    size,
+                    size,
+                ],
+            ));
+        }
         v
     }
     pub fn visible(&self, control: Control) -> bool {
-        matches!(control, Control::Hotbar(_) | Control::Pause) || !self.hidden.contains(&control)
+        matches!(
+            control,
+            Control::Hotbar(_) | Control::Pause | Control::Custom(_)
+        ) || !self.hidden.contains(&control)
     }
     pub fn set_hidden(&mut self, control: Control, hidden: bool) {
-        if matches!(control, Control::Hotbar(_) | Control::Pause) {
+        if matches!(
+            control,
+            Control::Hotbar(_) | Control::Pause | Control::Custom(_)
+        ) {
             return;
         }
         if hidden {
@@ -335,16 +426,77 @@ impl TouchSettings {
     }
     /// Where a button's top-left corner goes, as fractions of the screen.
     pub fn set_placement(&mut self, control: Control, x: f32, y: f32) {
-        if matches!(control, Control::Hotbar(_)) {
-            return;
+        let placement = Placement {
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+        };
+        match control {
+            Control::Hotbar(_) => {}
+            Control::Custom(id) => {
+                if let Some(button) = self.buttons.get_mut(&id) {
+                    button.placement = placement;
+                }
+            }
+            _ => {
+                self.placements.insert(control, placement);
+            }
         }
-        self.placements.insert(
-            control,
-            Placement {
-                x: x.clamp(0.0, 1.0),
-                y: y.clamp(0.0, 1.0),
+    }
+    /// A new button at the middle of the screen, showing "NEW" until a key is mapped.
+    pub fn add_button(&mut self, w: f32, h: f32) -> u16 {
+        let id = self
+            .buttons
+            .keys()
+            .next_back()
+            .copied()
+            .map_or(0, |id| id.saturating_add(1));
+        let size = (button_size(h) * self.scale.clamp(MIN_SCALE, MAX_SCALE)).round();
+        self.buttons.insert(
+            id,
+            CustomButton {
+                key: None,
+                placement: Placement {
+                    x: ((w - size) / 2.0).max(0.0) / w.max(1.0),
+                    y: ((h - size) / 2.0).max(0.0) / h.max(1.0),
+                },
+                scale: 1.0,
+                opacity: 1.0,
             },
         );
+        id
+    }
+    pub fn remove_button(&mut self, id: u16) {
+        self.buttons.remove(&id);
+    }
+    pub fn button(&self, id: u16) -> Option<&CustomButton> {
+        self.buttons.get(&id)
+    }
+    pub fn set_button_key(&mut self, id: u16, key: Option<String>) {
+        if let Some(button) = self.buttons.get_mut(&id) {
+            button.key = key;
+        }
+    }
+    pub fn set_button_scale(&mut self, id: u16, scale: f32) {
+        if let Some(button) = self.buttons.get_mut(&id) {
+            button.scale = scale.clamp(MIN_SCALE, MAX_SCALE);
+        }
+    }
+    pub fn set_button_opacity(&mut self, id: u16, opacity: f32) {
+        if let Some(button) = self.buttons.get_mut(&id) {
+            button.opacity = opacity.clamp(MIN_OPACITY, 1.0);
+        }
+    }
+    /// What the button shows: its key's name, or "NEW" until one is mapped.
+    pub fn button_label(&self, id: u16) -> String {
+        self.button(id)
+            .and_then(|button| button.key.as_deref())
+            .map_or_else(
+                || "NEW".to_owned(),
+                |key| keybinds::display_name(key).plain(),
+            )
+    }
+    pub fn button_key_code(&self, id: u16) -> Option<KeyCode> {
+        self.button(id)?.key.as_deref().and_then(keybinds::key_code)
     }
     /// The default positions and size; hidden buttons stay hidden and opacity stays as it is.
     pub fn reset_layout(&mut self) {
@@ -653,6 +805,90 @@ mod tests {
             placed(&l, Control::Hotbar(0)),
             placed(&base, Control::Hotbar(0))
         );
+    }
+
+    #[test]
+    fn custom_buttons_survive_a_round_trip() {
+        let mut s = TouchSettings::default();
+        let id = s.add_button(633.0, 292.0);
+        s.set_button_key(id, Some("key.keyboard.f3".into()));
+        s.set_button_scale(id, 1.25);
+        s.set_button_opacity(id, 0.5);
+        s.set_placement(Control::Custom(id), 0.1, 0.7);
+        assert_eq!(TouchSettings::parse(&s.serialize()), s);
+        assert_eq!(s.button_key_code(id), Some(winit::keyboard::KeyCode::F3));
+        // The face is the key's display name; a one-character key needs no translation table.
+        s.set_button_key(id, Some("key.keyboard.f".into()));
+        assert_eq!(s.button_label(id), "F");
+    }
+
+    #[test]
+    fn a_new_button_is_centred_and_labelled_new() {
+        let mut s = TouchSettings::default();
+        let id = s.add_button(600.0, 300.0);
+        assert_eq!(s.button_label(id), "NEW");
+        assert_eq!(s.button_key_code(id), None);
+        let r = placed(&s.layout(600.0, 300.0), Control::Custom(id));
+        let size = r[2];
+        assert!((r[0] - (600.0 - size) / 2.0).abs() < 0.01);
+        assert!((r[1] - (300.0 - size) / 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn custom_buttons_get_unique_ids_and_can_be_removed() {
+        let mut s = TouchSettings::default();
+        let a = s.add_button(640.0, 360.0);
+        let b = s.add_button(640.0, 360.0);
+        assert_ne!(a, b);
+        s.remove_button(a);
+        assert!(s.button(a).is_none());
+        assert!(
+            s.layout(640.0, 360.0)
+                .iter()
+                .any(|(c, _)| *c == Control::Custom(b))
+        );
+    }
+
+    #[test]
+    fn resetting_the_layout_keeps_custom_buttons() {
+        let mut s = TouchSettings::default();
+        let id = s.add_button(600.0, 300.0);
+        s.set_button_key(id, Some("key.keyboard.f3".into()));
+        s.reset_layout();
+        assert_eq!(s.button_key_code(id), Some(winit::keyboard::KeyCode::F3));
+    }
+
+    #[test]
+    fn a_custom_button_uses_its_own_size_and_opacity() {
+        let mut s = TouchSettings::default();
+        let id = s.add_button(600.0, 300.0);
+        let base = placed(&s.layout(600.0, 300.0), Control::Custom(id));
+        s.set_button_scale(id, 1.5);
+        s.set_button_opacity(id, 0.1);
+        let bigger = placed(&s.layout(600.0, 300.0), Control::Custom(id));
+        assert!((bigger[2] - base[2] * 1.5).abs() < 0.01);
+        let button = s.button(id).unwrap();
+        assert_eq!(button.opacity, MIN_OPACITY);
+    }
+
+    #[test]
+    fn bad_button_lines_are_skipped_or_clamped() {
+        let s = TouchSettings::parse(
+            "button:x:0,0:1:1:key.keyboard.f3\n\
+             button:2:2,-1:9:nope:\n\
+             button:3:0.5,0.5:1.25:0.5:key.keyboard.a\n\
+             button:4:0,0:1:1:key.keyboard.nope\n",
+        );
+        assert!(s.button(1).is_none());
+        let two = s.button(2).unwrap();
+        assert_eq!(two.placement, Placement { x: 1.0, y: 0.0 });
+        assert_eq!(two.scale, MAX_SCALE);
+        assert_eq!(two.opacity, 1.0);
+        assert_eq!(two.key, None);
+        let three = s.button(3).unwrap();
+        assert_eq!(three.key.as_deref(), Some("key.keyboard.a"));
+        // An unknown key name leaves the button without one.
+        assert_eq!(s.button(4).unwrap().key, None);
     }
 
     #[test]

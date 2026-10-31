@@ -9,11 +9,12 @@ use horizon_client::{
     touch::{self, Control, Out, Touches},
     touch_draw,
 };
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 use winit::{
     dpi::PhysicalPosition,
     event::{
-        DeviceId, ElementState, MouseButton, MouseScrollDelta, Touch, TouchPhase, WindowEvent,
+        DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, Touch, TouchPhase,
+        WindowEvent,
     },
     event_loop::ActiveEventLoop,
     keyboard::KeyCode,
@@ -37,6 +38,9 @@ pub(super) struct TouchInput {
     /// The button a finger held still on the world is holding down: attack to mine, or use to eat, drink or
     /// draw a bow.
     holding: Option<MouseButton>,
+    /// The key each custom button sent while it is held, so its release sends the same key even if the
+    /// mapping changed meanwhile.
+    custom_keys: BTreeMap<u16, KeyCode>,
     clock: Option<Instant>,
 }
 
@@ -67,7 +71,7 @@ fn key_of(control: Control) -> Option<KeyCode> {
         Control::Chat => KeyCode::KeyT,
         Control::Pause => KeyCode::Escape,
         Control::Inventory => KeyCode::KeyE,
-        Control::Sneak | Control::Hotbar(_) => return None,
+        Control::Sneak | Control::Hotbar(_) | Control::Custom(_) => return None,
     })
 }
 
@@ -199,7 +203,7 @@ impl Game<'_> {
             TouchPhase::Ended => self.touch.fingers.end(touch.id),
             TouchPhase::Cancelled => self.touch.fingers.cancel(touch.id),
         };
-        self.touch_act(out, batch.scale)
+        self.touch_act(event_loop, out, batch.scale)
     }
 
     /// Once a frame: a held finger starts mining, held-back clicks release, and a screen that opened over the
@@ -233,7 +237,7 @@ impl Game<'_> {
         let result = due
             .into_iter()
             .try_for_each(|(button, _)| self.play_mouse(button, false))
-            .and_then(|()| self.touch_act(out, scale));
+            .and_then(|()| self.touch_act(event_loop, out, scale));
         if let Err(e) = result {
             log::warn!("Horizon: touch: {e}");
         }
@@ -275,7 +279,7 @@ impl Game<'_> {
             .is_some_and(|info| info.consumable.is_some())
     }
 
-    fn touch_act(&mut self, out: Vec<Out>, scale: f32) -> Result<()> {
+    fn touch_act(&mut self, event_loop: &ActiveEventLoop, out: Vec<Out>, scale: f32) -> Result<()> {
         for o in out {
             match o {
                 Out::Press(Control::Hotbar(slot)) => self.selected = usize::from(slot),
@@ -291,8 +295,16 @@ impl Game<'_> {
                     }
                 }
                 Out::Press(control) | Out::Release(control) => {
-                    if let Some(key) = key_of(control) {
-                        self.mapped_key(key, matches!(o, Out::Press(_)), false)?;
+                    let pressed = matches!(o, Out::Press(_));
+                    match control {
+                        Control::Custom(id) => {
+                            self.touch_custom_key(event_loop, id, pressed)?;
+                        }
+                        _ => {
+                            if let Some(key) = key_of(control) {
+                                self.mapped_key(key, pressed, false)?;
+                            }
+                        }
                     }
                 }
                 Out::Look(dx, dy) => {
@@ -331,6 +343,51 @@ impl Game<'_> {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// A player's button: its mapped key, pressed and released as a keyboard would.
+    fn touch_custom_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: u16,
+        pressed: bool,
+    ) -> Result<()> {
+        if pressed {
+            if let Some(key) = self.settings.touch.button_key_code(id) {
+                self.touch.custom_keys.insert(id, key);
+                self.synthetic_key(event_loop, key, ElementState::Pressed)?;
+            }
+        } else if let Some(key) = self
+            .touch
+            .custom_keys
+            .remove(&id)
+            .or_else(|| self.settings.touch.button_key_code(id))
+        {
+            self.synthetic_key(event_loop, key, ElementState::Released)?;
+        }
+        Ok(())
+    }
+
+    /// A keyboard event the player's button stands for, through the same path as a real key.
+    fn synthetic_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        key: KeyCode,
+        state: ElementState,
+    ) -> Result<()> {
+        let Some(id) = self.window.as_ref().map(|w| w.id()) else {
+            return Ok(());
+        };
+        self.window_event(
+            event_loop,
+            id,
+            WindowEvent::KeyboardInput {
+                device_id: DeviceId::dummy(),
+                event: KeyEvent::synthetic(key, state),
+                is_synthetic: true,
+            },
+        );
         Ok(())
     }
 
@@ -535,6 +592,18 @@ impl Game<'_> {
             if matches!(control, Control::Hotbar(_)) {
                 continue;
             }
+            if let Control::Custom(id) = control {
+                let own = self.settings.touch.button(id).map_or(1.0, |b| b.opacity);
+                touch_draw::draw_custom(
+                    batch,
+                    atlas,
+                    &self.settings.touch.button_label(id),
+                    r,
+                    self.touch.fingers.held(control),
+                    opacity * own,
+                );
+                continue;
+            }
             touch_draw::draw_control(
                 batch,
                 atlas,
@@ -616,6 +685,7 @@ impl Game<'_> {
                     Control::Pause => "II".to_owned(),
                     Control::Inventory => "•••".to_owned(),
                     Control::Hotbar(slot) => (slot + 1).to_string(),
+                    Control::Custom(id) => self.settings.touch.button_label(id),
                 };
                 buttons.push(horizon_airplay::Button {
                     label,

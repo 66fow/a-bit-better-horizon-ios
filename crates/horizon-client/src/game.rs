@@ -13268,11 +13268,18 @@ impl Game<'_> {
             return;
         }
         follow_keymap(&mut event);
-        if let WindowEvent::KeyboardInput { event, .. } = &event
+        if let WindowEvent::KeyboardInput {
+            event,
+            is_synthetic,
+            ..
+        } = &event
             && let PhysicalKey::Code(key) = event.physical_key
         {
             if event.state == ElementState::Pressed {
-                self.touch_keyboard_used(event_loop);
+                // A touch control's mapped key is touch input: it must not hide the overlay.
+                if !is_synthetic {
+                    self.touch_keyboard_used(event_loop);
+                }
                 self.physical_keys.insert(key);
             } else {
                 self.physical_keys.remove(&key);

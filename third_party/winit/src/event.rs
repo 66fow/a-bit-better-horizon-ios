@@ -655,6 +655,30 @@ pub struct KeyEvent {
     pub(crate) platform_specific: platform_impl::KeyEventExtra,
 }
 
+impl KeyEvent {
+    /// A key event made without a keyboard, as a touch control's mapped key: only its
+    /// physical key and state mean anything.
+    pub fn synthetic(key: keyboard::KeyCode, state: ElementState) -> Self {
+        let logical_key = keyboard::Key::Unidentified(keyboard::NativeKey::Unidentified);
+        #[cfg(not(any(web_platform, target_os = "android", target_os = "ios")))]
+        let platform_specific = platform_impl::KeyEventExtra {
+            text_with_all_modifiers: None,
+            key_without_modifiers: logical_key.clone(),
+        };
+        #[cfg(any(web_platform, target_os = "android", target_os = "ios"))]
+        let platform_specific = platform_impl::KeyEventExtra {};
+        Self {
+            physical_key: keyboard::PhysicalKey::Code(key),
+            logical_key,
+            text: None,
+            location: keyboard::KeyLocation::Standard,
+            state,
+            repeat: false,
+            platform_specific,
+        }
+    }
+}
+
 /// Describes keyboard modifiers event.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Modifiers {
