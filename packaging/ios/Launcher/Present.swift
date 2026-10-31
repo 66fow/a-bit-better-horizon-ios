@@ -1,6 +1,9 @@
 import SwiftUI
 import UIKit
 
+/// The made-with-Unity clip plays on every app launch, not when Quit Game brings the launcher back.
+private var introShown = false
+
 /// The C entry point `horizon-ios-launcher` looks up: show the launcher while the engine is stopped or starting. Play dismisses it; the game's Quit Game asks for it again. `submit` is how the
 /// launcher asks the game things (Bridge.swift). Called on the main thread; the presenting waits a turn of the
 /// run loop, because at startup the game's view controller may not be on screen yet while its first frame is
@@ -28,7 +31,7 @@ private func present(attempts: Int) {
         return
     }
     let host = LauncherHostingController(rootView: AnyView(EmptyView()))
-    host.rootView = AnyView(
+    let home = AnyView(
         HomeView(onPlay: { [weak host] in
             guard let host else { return }
             GameAudio.start()
@@ -41,11 +44,27 @@ private func present(attempts: Int) {
         })
 
     )
+    // The intro belongs to opening the app: Quit Game brings the launcher back without it.
+    if introShown {
+        host.rootView = home
+    } else {
+        introShown = true
+        host.introRunning = true
+        host.rootView = AnyView(IntroView(onFinish: { [weak host] in
+            guard let host, host.introRunning else { return }
+            host.introRunning = false
+            host.unlockRotation()
+            UIView.transition(with: host.view, duration: 0.35, options: .transitionCrossDissolve) {
+                host.rootView = home
+            }
+        }))
+    }
     host.modalPresentationStyle = .fullScreen
     host.modalTransitionStyle = .crossDissolve
     root.present(host, animated: false) {
         Task { _ = await Bridge.send("launcher-visible true") }
-        turn(host.view.window?.windowScene, to: UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait)
+        // Upright for the intro, and for the launcher's own design on every device.
+        turn(host.view.window?.windowScene, to: .portrait)
     }
 }
 
@@ -84,16 +103,28 @@ func gameViewController() -> UIViewController? {
 
 /// The launcher stands upright, as the design does; the game under it is held sideways by its own view
 /// controller, which the phone turns back to when Play dismisses this one. GameInfo.plist allows both.
+/// The intro holds it to portrait; once it is done the launcher turns with the device like any screen.
 private final class LauncherHostingController: UIHostingController<AnyView> {
+    var introRunning = false
+
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
-        UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait
+        introRunning ? .portrait : .all
     }
     override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
-        guard UIDevice.current.userInterfaceIdiom == .pad else { return .portrait }
-        return UIApplication.shared.connectedScenes
-            .filter { $0.session.role == .windowApplication }
-        .compactMap { $0 as? UIWindowScene }
-            .first(where: { $0.activationState == .foregroundActive })?.interfaceOrientation ?? .portrait
+        .portrait
     }
+    override var prefersStatusBarHidden: Bool { introRunning }
+    override var prefersHomeIndicatorAutoHidden: Bool { introRunning }
     override var preferredStatusBarStyle: UIStatusBarStyle { .default }
+
+    /// Lifts the intro's portrait hold, so the launcher may turn with the device from now on.
+    func unlockRotation() {
+        setNeedsStatusBarAppearanceUpdate()
+        setNeedsUpdateOfHomeIndicatorAutoHidden()
+        if #available(iOS 16.0, *) {
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+        } else {
+            UIViewController.attemptRotationToDeviceOrientation()
+        }
+    }
 }
