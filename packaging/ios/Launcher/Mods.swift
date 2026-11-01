@@ -149,6 +149,8 @@ struct ModsPage: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SectionHeader(title: "Installed")
+            Text("⚠️ .hmod files that carry code (a mod.wasm) do not run on iOS — only content mods work.")
+                .font(Theme.sans(11)).foregroundStyle(Theme.textFaint)
             if store.loading && store.rows.isEmpty {
                 ProgressView().tint(Theme.accentText).frame(maxWidth: .infinity).padding(24)
             } else if store.rows.isEmpty {

@@ -196,7 +196,7 @@ struct HomeView: View {
                     Image(systemName: "puzzlepiece.extension")
                         .font(.title3).foregroundStyle(Theme.accent)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Mods").font(.headline).foregroundStyle(Theme.text)
+                        Text("Mods (experimental ⚠️)").font(.headline).foregroundStyle(Theme.text)
                         Text("Install .hmod content mods, and open the mod folder")
                             .font(.subheadline).foregroundStyle(Theme.textMuted)
                     }
