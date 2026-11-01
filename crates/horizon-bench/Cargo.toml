@@ -1,6 +1,6 @@
 [package]
 name = "horizon-bench"
-version = "0.2.0"
+version = "0.2.4"
 edition = "2021"
 license = "MIT"
 description = "The benchmark report format (docs/benchmark-report.md), shared by the game, the launcher and the upload"

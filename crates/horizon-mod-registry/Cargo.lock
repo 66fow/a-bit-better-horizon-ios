@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-mod-registry"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "axum",
  "base64",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-mods"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "horizon-shader-api",
  "log",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-shader-api"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "bytemuck",
  "naga",

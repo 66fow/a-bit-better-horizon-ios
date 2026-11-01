@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-telemetry"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "getrandom 0.3.4",
  "ruzstd",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-telemetry-server"
-version = "0.1.0"
+version = "0.2.4"
 dependencies = [
  "axum",
  "horizon-telemetry",
