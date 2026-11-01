@@ -14,6 +14,10 @@ private let previewSubmit: HorizonSubmit = { pointer, context, done in
             ["folder": "islands", "name": "The Islands", "mode": "survival", "version": "26.3", "last_played": Date().timeIntervalSince1970 * 1000 - 172800000]
         ]]
     case "servers": response = ["servers": [["index": 0, "name": "Hypixel", "address": "mc.hypixel.net"]]]
+    case "mods-list": response = ["folder": GameFolder.mods.path, "mods": [[
+        "file": "example.hmod", "id": "example", "name": "Example Content", "version": "1.0.0",
+        "description": "A sample content mod: a few blocks, items and decoration.",
+        "api": "0.2", "enabled": true, "code": false]]]
     case "server-ping mc.hypixel.net": response = ["motd": "§6§lHypixel Network §8[§c1.8 / 26.3§8]\n§f§lSKYBLOCK §r§dHalloween Event", "online": 9813, "max": 200000, "version": "Java Edition", "ms": 79]
     default: response = ["ok": true]
     }

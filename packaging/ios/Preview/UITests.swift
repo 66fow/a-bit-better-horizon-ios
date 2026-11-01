@@ -72,6 +72,18 @@ final class LauncherLayoutTests: XCTestCase {
         image.name = "Native three-tab navigation"; image.lifetime = .keepAlways; add(image)
     }
 
+    func testModsCardOpensTheModsPage() {
+        let app = launch(signedIn: false)
+        let card = app.descendants(matching: .any).matching(identifier: "launcher-mods-card").firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 5))
+        card.tap()
+        XCTAssertTrue(app.staticTexts["Example Content"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.buttons["mods-install-button"].exists)
+        XCTAssertTrue(app.buttons["mods-open-folder"].exists)
+        // Mods is a card on the Play page, never a fourth tab.
+        XCTAssertEqual(app.tabBars.firstMatch.buttons.count, 3)
+    }
+
     func testAccountControlIsCircularAndLibraryRoutesAreAbsent() {
         let app = launch(signedIn: true)
         let avatar = app.buttons["launcher-account-button"]

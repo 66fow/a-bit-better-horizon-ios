@@ -8,6 +8,12 @@ enum GameFolder {
     static var saves: URL { documents.appendingPathComponent("saves") }
     static var screenshots: URL { documents.appendingPathComponent("screenshots") }
     static var resources: URL { documents.appendingPathComponent("resources") }
+    /// Content `.hmod` mods the game loads, and the folder `horizon-mods.txt` names.
+    static var mods: URL { documents.appendingPathComponent("horizon-mods") }
+    /// Native `.hnmod` mods; on iOS they cannot be built into the game, but the folder is still the game's.
+    static var nativeMods: URL { documents.appendingPathComponent("horizon-native-mods") }
+    /// Where picked files are copied before the game validates and moves them in.
+    static var imports: URL { documents.appendingPathComponent(".horizon-import") }
 
     /// Whether imported game files are in place (`import::resources_root`'s second stop).
     static var hasGameFiles: Bool {

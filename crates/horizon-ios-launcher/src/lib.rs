@@ -166,6 +166,18 @@ pub fn present_download() -> bool {
     false
 }
 
+/// Show `path` in the system's file browser: the Files app on a phone. False on a desktop, or when the
+/// bundle has no launcher framework, and the caller opens it with the desktop's file manager instead.
+pub fn open_folder(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "ios")]
+    return ios::call_with_path(ios::OPEN_FOLDER, path);
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 #[cfg(target_os = "ios")]
 mod ios {
     use std::ffi::{CStr, CString, c_char, c_void};
@@ -174,6 +186,8 @@ mod ios {
     const SYMBOL: &CStr = c"horizon_launcher_present";
     /// `horizon_download_present` in packaging/ios/Launcher/DownloadView.swift.
     pub const DOWNLOAD: &CStr = c"horizon_download_present";
+    /// `horizon_open_folder` in packaging/ios/Launcher/Mods.swift.
+    pub const OPEN_FOLDER: &CStr = c"horizon_open_folder";
 
     /// How the launcher hears back: its context, and the answer as NUL-terminated UTF-8 JSON that lives
     /// only for the call.
@@ -216,26 +230,54 @@ mod ios {
 
     /// Call `symbol` in the launcher framework with the bridge; false when there is no framework or symbol.
     pub fn call(symbol_name: &CStr) -> bool {
-        let Some(path) = framework() else {
-            log::info!("Horizon: no launcher framework in this bundle");
+        let Some(symbol) = symbol(symbol_name) else {
             return false;
         };
-        // SAFETY: dlopen and dlsym on a framework Xcode built and signed into this bundle; the symbol is a
-        // `@_cdecl` Swift function taking the bridge's C function pointer and returning a Bool, called on
-        // the main thread (the game's window event), which is where UIKit has to be touched.
+        // SAFETY: the launcher's `@_cdecl` function takes the bridge's C function pointer and returns a
+        // Bool; it is called on the main thread (the game's window event), where UIKit has to be touched.
+        unsafe {
+            let present: extern "C" fn(Submit) -> bool = std::mem::transmute(symbol);
+            present(submit)
+        }
+    }
+
+    /// Call `symbol` in the launcher framework with a NUL-terminated path; false when there is no
+    /// framework, no symbol, or the path has a NUL in it.
+    pub fn call_with_path(symbol_name: &CStr, path: &std::path::Path) -> bool {
+        let Ok(path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+            return false;
+        };
+        let Some(symbol) = symbol(symbol_name) else {
+            return false;
+        };
+        // SAFETY: the launcher's `@_cdecl` function takes a NUL-terminated UTF-8 path and returns a Bool,
+        // on the main thread, where UIKit has to be touched; the path outlives the call.
+        unsafe {
+            let open: extern "C" fn(*const c_char) -> bool = std::mem::transmute(symbol);
+            open(path.as_ptr())
+        }
+    }
+
+    /// Load the launcher framework and find `symbol_name` in it.
+    fn symbol(symbol_name: &CStr) -> Option<*mut c_void> {
+        let Some(path) = framework() else {
+            log::info!("Horizon: no launcher framework in this bundle");
+            return None;
+        };
+        // SAFETY: dlopen and dlsym on a framework Xcode built and signed into this bundle; the handle
+        // stays loaded for the process, as the launcher does.
         unsafe {
             let handle = libc::dlopen(path.as_ptr(), libc::RTLD_NOW);
             if handle.is_null() {
                 log::warn!("Horizon: the launcher framework did not load");
-                return false;
+                return None;
             }
             let symbol = libc::dlsym(handle, symbol_name.as_ptr());
             if symbol.is_null() {
                 log::warn!("Horizon: the launcher framework has no {symbol_name:?}");
-                return false;
+                return None;
             }
-            let present: extern "C" fn(Submit) -> bool = std::mem::transmute(symbol);
-            present(submit)
+            Some(symbol)
         }
     }
 }

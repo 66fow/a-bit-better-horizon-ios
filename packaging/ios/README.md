@@ -51,7 +51,7 @@ between this bundle and a playable one:
 | Gap | Why it is structural | Decided |
 |---|---|---|
 | Assets | `horizon-prepare` runs a JDK against the player's own Minecraft install to produce `.local/horizon-client/26.3`; there is no Java on iOS | Prepare off-device, download to the phone |
-| Mods | `horizon-mods` runs them through wasmtime's cranelift JIT, and Apple forbids generating executable code at runtime (`docs/mods.md`) -- note the runner says the `mods` *feature compiles*, which is about the compiler and not about running | Disabled on iOS |
+| Mods | Native mods (`.hnmod`) are Rust built into the game, and code-bearing `.hmod` files need wasmtime's cranelift JIT, which Apple forbids at runtime (`docs/mods.md`) -- note the runner says the `mods` *feature compiles*, which is about the compiler and not about running | Content `.hmod` mods install, list, switch and delete from the launcher's Mods page; native and code mods do not run on iOS |
 | Input | the client's winit loop is desktop-shaped: cursor-warp mouse look, no touch | A touch layer, in no crate yet |
 | Sound, controllers | `hidapi`/`gilrs` need libudev or IOKit, which is what `--no-default-features` drops and why the phone build asks for that flag; `cpal` (the `audio` feature) has a CoreAudio backend for iOS too, through RemoteIO | `--features audio` on the phone, with the launcher setting up the audio session; `GCController` for pads |
 

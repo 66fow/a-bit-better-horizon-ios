@@ -429,7 +429,10 @@ impl Loading {
                 Event::OpenModFolder => {
                     let dir = Game::options_path().with_file_name(horizon_client::mod_list::DIR);
                     let _ = std::fs::create_dir_all(&dir);
-                    packs::open_folder(&dir);
+                    // On a phone, the Files app: there is no file manager to spawn.
+                    if !horizon_ios_launcher::open_folder(&dir) {
+                        packs::open_folder(&dir);
+                    }
                 }
                 Event::ListShaderPacks => {
                     self.settings.shader_packs =

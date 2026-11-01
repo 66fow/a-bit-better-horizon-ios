@@ -191,6 +191,24 @@ struct HomeView: View {
     private var home: some View {
         VStack(alignment: .leading, spacing: 28) {
             launchPanel
+            NavigationLink { page { ModsPage() }.navigationTitle("Mods") } label: {
+                HStack(spacing: 14) {
+                    Image(systemName: "puzzlepiece.extension")
+                        .font(.title3).foregroundStyle(Theme.accent)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Mods").font(.headline).foregroundStyle(Theme.text)
+                        Text("Install .hmod content mods, and open the mod folder")
+                            .font(.subheadline).foregroundStyle(Theme.textMuted)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.footnote.weight(.semibold)).foregroundStyle(Theme.textFaint)
+                }
+                .padding(16)
+                .card()
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("launcher-mods-card")
             if needsFiles { GameFilesCard(download: download, missing: true) }
         }
     }

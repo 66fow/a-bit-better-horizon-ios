@@ -26,6 +26,13 @@ Mods are **off by default**. A fresh install has no `horizon-mods` folder and pl
 Two turned-on content mods never own the same namespace: the first by file name loads, and the other stays out with
 the reason in the log.
 
+### On iPhone and iPad
+
+The iOS launcher's **Mods** page (`packaging/ios`) installs, lists, switches and deletes `.hmod` content mods, and
+**Open Mod Folder** shows `Documents/horizon-mods` in the Files app. Two things do not run there: native `.hnmod`
+mods, because the game is not rebuilt on the phone, and `.hmod` files that carry code (`mod.wasm`), because Apple
+does not allow a JIT. A switch takes effect after **Quit Game** → **Play**, or after reopening the app.
+
 Benchmarks (`--benchmark`) never load mods.
 
 ## Making a content mod

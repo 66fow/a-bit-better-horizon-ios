@@ -19,10 +19,12 @@ use std::{
 };
 use winit::event_loop::ActiveEventLoop;
 
-/// What came back for a launcher request so far: a control answer, or an import's result.
+/// What came back for a launcher request so far: a control answer, an import's result, or a mod
+/// install's.
 enum Waiting {
     Control(Receiver<String>),
     Import(Receiver<std::result::Result<Installed, String>>),
+    Mods(Receiver<std::result::Result<Value, String>>),
 }
 
 thread_local! {
@@ -51,6 +53,12 @@ fn deliver() -> bool {
                 Ok(Err(error)) => request.answer(&json!({ "error": error }).to_string()),
                 Err(TryRecvError::Disconnected) => {}
                 Err(TryRecvError::Empty) => still.push((Waiting::Import(result), request)),
+            },
+            Waiting::Mods(result) => match result.try_recv() {
+                Ok(Ok(installed)) => request.answer(&installed.to_string()),
+                Ok(Err(error)) => request.answer(&json!({ "error": error }).to_string()),
+                Err(TryRecvError::Disconnected) => {}
+                Err(TryRecvError::Empty) => still.push((Waiting::Mods(result), request)),
             },
         }
     }
@@ -84,6 +92,50 @@ fn start_import(request: horizon_ios_launcher::Request) {
     match spawned {
         Ok(_) => PENDING.with_borrow_mut(|p| p.push((Waiting::Import(receiver), request))),
         Err(error) => request.answer(&json!({ "error": error.to_string() }).to_string()),
+    }
+}
+
+/// Install the `.hmod` named by `mods-install PATH` on a worker: it validates the package's content
+/// and moves it into `horizon-mods`, off the thread that draws.
+fn start_mods_install(request: horizon_ios_launcher::Request) {
+    let staged = match super::mods_control::install_arg(&request.line) {
+        Ok(staged) => staged,
+        Err(error) => {
+            request.answer(&json!({ "error": error }).to_string());
+            return;
+        }
+    };
+    let dir = std::env::current_dir().unwrap_or_default();
+    let (sender, receiver) = mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("horizon-mods-install".into())
+        .spawn(move || {
+            let _ = sender.send(super::mods_control::install(&dir, &staged));
+        });
+    match spawned {
+        Ok(_) => PENDING.with_borrow_mut(|p| p.push((Waiting::Mods(receiver), request))),
+        Err(error) => request.answer(&json!({ "error": error.to_string() }).to_string()),
+    }
+}
+
+/// `mods-list`, `mods-set` and `mods-delete`: files only, so both launchers answer them at once.
+fn mods_command(request: horizon_ios_launcher::Request) {
+    let dir = std::env::current_dir().unwrap_or_default();
+    let answer = match super::mods_control::command(&dir, &request.line) {
+        Ok(Some(value)) => value,
+        Ok(None) => json!({ "error": format!("{}: not a mods command", request.line) }),
+        Err(error) => json!({ "error": error.to_string() }),
+    };
+    request.answer(&answer.to_string());
+}
+
+/// The launchers' settings hold the mod list as it was when they read it: read it again after a
+/// command changed it, so the next Play loads what the Mods page says.
+fn refresh_mods(settings: &mut horizon_client::settings::Settings) {
+    if super::mods_control::take_dirty()
+        && let Ok(dir) = std::env::current_dir()
+    {
+        super::mods_control::reload(settings, &dir);
     }
 }
 
@@ -123,6 +175,8 @@ impl Game<'_> {
                     request.answer(&state.to_string());
                 }
                 "import" => start_import(request),
+                "mods-list" | "mods-set" | "mods-delete" => mods_command(request),
+                "mods-install" => start_mods_install(request),
                 // The game is up: the download screen has nothing left to show.
                 "download-state" => request.answer(r#"{"phase":"done"}"#),
                 "launcher-start" => request.answer(r#"{"ok":true}"#),
@@ -138,6 +192,7 @@ impl Game<'_> {
         }
         // Game files that arrive while the game runs are read on its next start.
         deliver();
+        refresh_mods(&mut self.settings);
     }
 
     /// `launcher-world`: Select World's Play by folder here; the rest is files (`world_files`).
@@ -368,6 +423,8 @@ impl Loading {
                         );
                     }
                 }
+                "mods-list" | "mods-set" | "mods-delete" => mods_command(request),
+                "mods-install" => start_mods_install(request),
                 _ => {
                     if let Some(request) = file_request(request) {
                         request.answer(
@@ -378,7 +435,10 @@ impl Loading {
                 }
             }
         }
-        if deliver() && self.importing() {
+        let resources = deliver();
+        // Before a restarted load reads the settings.
+        refresh_mods(&mut self.settings);
+        if resources && self.importing() {
             self.files_arrived()?;
         }
         Ok(())

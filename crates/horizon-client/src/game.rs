@@ -171,6 +171,7 @@ mod mob_blocks;
 mod mob_gear;
 mod mob_sounds;
 mod mods;
+mod mods_control;
 mod mount_menu;
 mod mounts;
 mod moving_pistons;
