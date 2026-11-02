@@ -346,10 +346,18 @@ pub fn hdr_offered() -> bool {
 /// Apple's: they share the CPU's memory bandwidth, and past it far terrain
 /// costs them more frame time than it is worth.
 pub const INTEGRATED_LOD_DISTANCE: u32 = 128;
-/// Whether `INTEGRATED_LOD_DISTANCE` applies to this adapter. Apple's GPUs
-/// are integrated too, with memory and bandwidth enough for every distance.
+/// The farthest LOD Distance the options offer, in chunks: every iOS GPU is a
+/// phone's or tablet's, without a Mac's headroom for far terrain.
+#[cfg(target_os = "ios")]
+pub const LOD_DISTANCE_CAP: u32 = INTEGRATED_LOD_DISTANCE;
+#[cfg(not(target_os = "ios"))]
+pub const LOD_DISTANCE_CAP: u32 = 1024;
+/// Whether `INTEGRATED_LOD_DISTANCE` applies to this adapter. Apple's Macs
+/// are integrated too, with memory and bandwidth enough for every distance;
+/// iOS's are not.
 pub fn lod_capped(info: &wgpu::AdapterInfo) -> bool {
-    info.device_type == wgpu::DeviceType::IntegratedGpu && !info.name.starts_with("Apple")
+    let apple = info.name.starts_with("Apple");
+    info.device_type == wgpu::DeviceType::IntegratedGpu && (!apple || cfg!(target_os = "ios"))
 }
 /// A LOD distance as far terrain uses it on this adapter.
 pub fn lod_distance_capped(distance: u32, info: &wgpu::AdapterInfo) -> u32 {
@@ -501,7 +509,7 @@ impl Graphics {
             let number = |d: u32| value.parse().unwrap_or(d);
             match key.trim() {
                 "preset" => g.preset = Preset::parse(value),
-                "lodDistance" => g.lod_distance = number(g.lod_distance).min(1024),
+                "lodDistance" => g.lod_distance = number(g.lod_distance).min(LOD_DISTANCE_CAP),
                 "farDetail" => g.far_detail = FarDetail::parse(value),
                 "caveCulling" => g.cave_culling = flag(g.cave_culling),
                 "entityCulling" => g.entity_culling = flag(g.entity_culling),
@@ -784,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn integrated_gpus_other_than_apple_cap_the_lod_distance() {
+    fn integrated_gpus_cap_the_lod_distance() {
         let adapter = |name: &str, device_type| wgpu::AdapterInfo {
             name: name.into(),
             vendor: 0,
@@ -805,13 +813,19 @@ mod tests {
         );
         let m4 = adapter("Apple M4 Pro", wgpu::DeviceType::IntegratedGpu);
         let discrete = adapter("NVIDIA GeForce RTX 4070", wgpu::DeviceType::DiscreteGpu);
+        // iOS caps its Apple GPUs too; a Mac's are not.
+        let apple = if cfg!(target_os = "ios") {
+            |distance: u32| distance.min(INTEGRATED_LOD_DISTANCE)
+        } else {
+            |distance: u32| distance
+        };
         for (distance, capped) in [(0, 0), (64, 64), (128, 128), (256, 128), (1024, 128)] {
             let g = Graphics {
                 lod_distance: distance,
                 ..Graphics::default()
             };
             assert_eq!(g.lod_distance_on(&hd620), capped);
-            assert_eq!(g.lod_distance_on(&m4), distance);
+            assert_eq!(g.lod_distance_on(&m4), apple(distance));
             assert_eq!(g.lod_distance_on(&discrete), distance);
         }
         assert!(
@@ -828,10 +842,13 @@ mod tests {
         assert_eq!(Graphics::default().lod_distance, 0);
         for distance in [0, 64, 128, 256, 512, 1024] {
             let g = Graphics::parse(&format!("lodDistance:{distance}\n"));
-            assert_eq!(g.lod_distance, distance);
+            assert_eq!(g.lod_distance, distance.min(LOD_DISTANCE_CAP));
             assert_eq!(Graphics::parse(&g.serialize()), g);
         }
-        assert_eq!(Graphics::parse("lodDistance:10000\n").lod_distance, 1024);
+        assert_eq!(
+            Graphics::parse("lodDistance:10000\n").lod_distance,
+            LOD_DISTANCE_CAP
+        );
         assert_eq!(Graphics::parse("lodDistance:-1\n").lod_distance, 0);
         assert_eq!(Graphics::parse("lodDistance:invalid\n").lod_distance, 0);
     }

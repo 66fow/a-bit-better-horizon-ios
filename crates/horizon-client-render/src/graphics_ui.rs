@@ -533,7 +533,12 @@ impl H {
         let g = &mut s.horizon;
         match self {
             H::LodDistance => {
-                g.lod_distance = step(&[0, 64, 128, 256, 512, 1024], g.lod_distance, back)
+                let cap = crate::graphics::LOD_DISTANCE_CAP;
+                let steps = [0, 64, 128, 256, 512, 1024];
+                let count = steps.iter().take_while(|&&d| d <= cap).count();
+                // An option above the cap (a settings file from elsewhere)
+                // comes down to it on the first step.
+                g.lod_distance = step(&steps[..count], g.lod_distance.min(cap), back)
             }
             H::FarDetail => {
                 g.far_detail = step(&[FarDetail::Full, FarDetail::Reduced], g.far_detail, back)
@@ -1289,14 +1294,23 @@ mod tests {
                 .unwrap();
             assert_eq!(items[render + 1], item);
         }
-        for distance in [64, 128, 256, 512, 1024, 0] {
+        let cap = crate::graphics::LOD_DISTANCE_CAP;
+        let steps: Vec<u32> = [64, 128, 256, 512, 1024]
+            .into_iter()
+            .filter(|&d| d <= cap)
+            .collect();
+        for distance in steps.iter().copied().chain([0]) {
             item.cycle(&mut s, false, [854, 480]);
             assert_eq!(s.horizon.lod_distance, distance);
             assert_eq!(s.render_distance, near);
         }
         item.cycle(&mut s, true, [854, 480]);
-        assert_eq!(s.horizon.lod_distance, 1024);
-        assert_eq!(item.label(&s).plain(), "LOD Distance: 1024 chunks");
+        let top = *steps.last().unwrap();
+        assert_eq!(s.horizon.lod_distance, top);
+        assert_eq!(
+            item.label(&s).plain(),
+            format!("LOD Distance: {top} chunks")
+        );
         assert_eq!(
             Item::Vanilla(Opt::RenderDistance).label(&s).plain(),
             format!("Full Detail Distance: {near} chunks")

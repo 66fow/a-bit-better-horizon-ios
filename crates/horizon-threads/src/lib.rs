@@ -127,6 +127,25 @@ fn behind() -> bool {
     false
 }
 
+/// Run the calling thread behind the frame and the server but still at a
+/// steady pace: utility quality of service on Apple, where `behind_server` has
+/// no nice level to lower (far terrain, work no frame waits for but that
+/// should keep up). Whether the OS took it.
+pub fn utility_current() -> bool {
+    utility()
+}
+
+#[cfg(target_vendor = "apple")]
+fn utility() -> bool {
+    // SAFETY: sets the calling thread's own QoS class; no pointers.
+    unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) == 0 }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn utility() -> bool {
+    false
+}
+
 /// Run the calling thread only on a core nothing else wants: work that may
 /// take seconds and that nothing waits for yet (the stronghold rings while a
 /// world opens). The idle class on Linux, background quality of service on

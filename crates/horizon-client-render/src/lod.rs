@@ -674,6 +674,14 @@ pub struct Lod {
     reduced: Reduced,
     saved_order: VecDeque<(i32, i32)>,
 }
+/// Far work runs behind the frames and ticks but keeps a pace: a lower nice
+/// level on Linux and Android, utility QoS on Apple, where `behind_server`
+/// has no nice level to lower.
+fn behind_frame() {
+    if !horizon_threads::behind_server() {
+        horizon_threads::utility_current();
+    }
+}
 impl Lod {
     pub fn new(source: Arc<dyn LodSource>, context: Arc<WorkerContext>) -> Self {
         let cores = thread::available_parallelism().map_or(1, |n| n.get());
@@ -692,7 +700,7 @@ impl Lod {
             .name("Far terrain".into())
             .spawn(move || {
                 // Ticks and frames come first (horizon_threads).
-                horizon_threads::behind_server();
+                behind_frame();
                 let mut sampler = source.sampler();
                 let count = sampling_threads(cores);
                 let mut sampling = Vec::new();
@@ -706,7 +714,7 @@ impl Lod {
                         thread::Builder::new()
                             .name("Far sampling".into())
                             .spawn(move || {
-                                horizon_threads::behind_server();
+                                behind_frame();
                                 loop {
                                     let key = {
                                         let mut jobs = shared.jobs.lock().unwrap();
@@ -819,6 +827,7 @@ impl Lod {
                                     .zip(meshers.iter_mut())
                                     .map(|(work, mesher)| {
                                         scope.spawn(move || {
+                                            behind_frame();
                                             let mut meshes = Vec::with_capacity(work.len());
                                             for (key, finer) in work {
                                                 if stop.load(Ordering::Relaxed) {
@@ -1600,7 +1609,13 @@ impl Drop for Lod {
         drop(jobs);
         self.shared.wake.notify_all();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            // A sample job can be a while from its next stop check: turning
+            // far terrain off must not wait on it, so its exit is joined apart.
+            let _ = std::thread::Builder::new()
+                .name("Far terrain join".into())
+                .spawn(move || {
+                    let _ = thread.join();
+                });
         }
     }
 }
