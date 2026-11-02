@@ -13184,6 +13184,19 @@ impl Game<'_> {
     pub(super) fn sync_level(&mut self) {
         // Level.write saves the game rules (game_rules.dat) with the rest.
         self.level.game_rules = self.ui.rules.by_name();
+        // PrimaryLevelData.setDifficulty: /difficulty and the options button change it.
+        self.level.difficulty =
+            horizon_client::title::DIFFICULTIES[usize::from(self.ui.difficulty) & 3].into();
+        self.level.time = self.world.game_time;
+        self.level.weather = self.world.weather;
+        self.level.day_time = self.world.day_time;
+        // A server has no in-frame player of its own; `enter_guest` puts one in
+        // `self.player` only while a command reads it. Its owner's state is in
+        // the level already (`save_guest`), so the server's own inventory and
+        // defaults must not overwrite it.
+        if self.player.is_none() && self.options.dedicated.is_some() {
+            return;
+        }
         self.level.selected_slot = self.selected as i32;
         let mode = self.mode_id();
         // The vehicle the player rides (`ServerPlayer.saveParentVehicle`).
@@ -13192,12 +13205,6 @@ impl Game<'_> {
         level.creative = self.creative;
         level.game_mode = mode;
         level.previous_game_mode = self.previous_mode.map(game_mode::mode_id_of);
-        // PrimaryLevelData.setDifficulty: /difficulty and the options button change it.
-        level.difficulty =
-            horizon_client::title::DIFFICULTIES[usize::from(self.ui.difficulty) & 3].into();
-        level.time = self.world.game_time;
-        level.weather = self.world.weather;
-        level.day_time = self.world.day_time;
         level.spawn = self.spawn.map(|s| [s.x, s.y, s.z]);
         level.respawn_elsewhere = self.respawn_config.map(|c| c.saved());
         level.rotation = [self.yaw, self.pitch];
@@ -13301,11 +13308,11 @@ impl Game<'_> {
         self.save_warden_tracker();
         self.sync_level();
         self.store_owner();
-        if self.options.dedicated.is_some() {
-            self.level.write_without_player(&self.world_root)?;
-        } else {
-            self.level.write(&self.world_root)?;
-        }
+        write_level_for_role(
+            &mut self.level,
+            &self.world_root,
+            self.options.execution_role,
+        )?;
         self.save_world_state();
         self.message = Some(("Saved the game".into(), Instant::now()));
         Ok(())
@@ -18572,6 +18579,21 @@ mod runtime_reset_tests {
 #[cfg(test)]
 mod entity_model_loading_tests;
 
+/// A world's `level.dat`: single-player roles write the owner's player into it,
+/// a dedicated server saves each connected player separately and only writes
+/// the world's metadata.
+fn write_level_for_role(
+    level: &mut Level,
+    dir: &std::path::Path,
+    role: execution_role::ExecutionRole,
+) -> Result<()> {
+    if role.writes_singleplayer_player() {
+        level.write(dir)
+    } else {
+        level.write_without_player(dir)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -18877,5 +18899,63 @@ mod tests {
             ModifiersState::empty(),
             &HashSet::new()
         ));
+    }
+
+    #[test]
+    fn integrated_server_save_persists_owner_player_data() {
+        let dir = std::env::temp_dir().join(format!(
+            "horizon-integrated-player-save-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Initial world creation writes `level.dat` before the player spawns.
+        let mut level = Level {
+            name: "Creative".into(),
+            creative: true,
+            game_mode: 1,
+            ..Level::default()
+        };
+        level.write(&dir).unwrap();
+
+        // The integrated server stores the owner's state in `level` and saves the world.
+        level.position = Some([128.5, 72.0, -64.25]);
+        level.inventory = vec![(0, "minecraft:diamond_pickaxe".into(), 1, 0)];
+        write_level_for_role(
+            &mut level,
+            &dir,
+            execution_role::ExecutionRole::IntegratedServer,
+        )
+        .unwrap();
+
+        let reopened = Level::read(&dir).unwrap();
+        assert_eq!(reopened.position, Some([128.5, 72.0, -64.25]));
+        assert_eq!(
+            reopened.inventory,
+            vec![(0, "minecraft:diamond_pickaxe".into(), 1, 0)]
+        );
+
+        // A dedicated server save updates world metadata without overwriting the player file.
+        let mut dedicated = Level {
+            player_uuid: level.player_uuid,
+            day_time: 6000,
+            ..Level::default()
+        };
+        write_level_for_role(
+            &mut dedicated,
+            &dir,
+            execution_role::ExecutionRole::DedicatedServer,
+        )
+        .unwrap();
+
+        let reopened = Level::read(&dir).unwrap();
+        assert_eq!(reopened.day_time, 6000);
+        assert_eq!(reopened.position, Some([128.5, 72.0, -64.25]));
+        assert_eq!(
+            reopened.inventory,
+            vec![(0, "minecraft:diamond_pickaxe".into(), 1, 0)]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
