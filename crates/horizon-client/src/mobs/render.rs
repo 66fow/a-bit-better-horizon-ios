@@ -521,18 +521,8 @@ pub fn layers(m: &Mob, age: f32) -> Vec<Layer> {
     use Species as S;
     let mut v = Vec::new();
     if avatar(m) {
-        // CapeLayer: not over an elytra, which wears the cape's texture itself.
-        if let Some(cape) = &m.cape
-            && m.extra.chest.as_deref() != Some("minecraft:elytra")
-        {
-            v.push(Layer {
-                model: "player#cape".into(),
-                texture: cape.clone(),
-                color: 0xFFFF_FFFF,
-                full_bright: false,
-                scroll: 0.0,
-            });
-        }
+        // A player's cape belongs to PlayerRenderer's own layers (`cape`), which
+        // swing it with the cloak lag; drawing it here too left two capes.
         return v;
     }
     let white = 0xFFFF_FFFF;
