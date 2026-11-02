@@ -19,6 +19,23 @@ use std::{
 };
 use winit::event_loop::ActiveEventLoop;
 
+/// The portrait launcher and landscape game share a UIWindow. Permit the
+/// launcher's orientation before acknowledging its presentation request.
+fn launcher_visibility(window: Option<&winit::window::Window>, visible: bool) {
+    horizon_ios_launcher::set_covered(visible);
+    #[cfg(target_os = "ios")]
+    if let Some(window) = window {
+        use winit::platform::ios::{ValidOrientations, WindowExtIOS};
+        window.set_valid_orientations(if visible {
+            ValidOrientations::LandscapeAndPortrait
+        } else {
+            ValidOrientations::Landscape
+        });
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = window;
+}
+
 /// What came back for a launcher request so far: a control answer, an import's result, or a mod
 /// install's.
 enum Waiting {
@@ -161,7 +178,7 @@ impl Game<'_> {
             let command = request.line.split_whitespace().next().unwrap_or_default();
             match command {
                 "launcher-visible" => {
-                    horizon_ios_launcher::set_covered(request.line.ends_with(" true"));
+                    launcher_visibility(self.window.as_deref(), request.line.ends_with(" true"));
                     request.answer(r#"{"ok":true}"#);
                 }
 
@@ -369,7 +386,7 @@ impl Loading {
             let command = request.line.split_whitespace().next().unwrap_or_default();
             match command {
                 "launcher-visible" => {
-                    horizon_ios_launcher::set_covered(request.line.ends_with(" true"));
+                    launcher_visibility(self.window.as_deref(), request.line.ends_with(" true"));
                     request.answer(r#"{"ok":true}"#);
                 }
 

@@ -4,6 +4,9 @@ import UIKit
 /// The made-with-Unity clip plays on every app launch, not when Quit Game brings the launcher back.
 private var introShown = false
 
+// Presentation requests can overlap while the Rust bridge acknowledges them.
+private var presentationPending = false
+
 /// The C entry point `horizon-ios-launcher` looks up: show the launcher while the engine is stopped or starting. Play dismisses it; the game's Quit Game asks for it again. `submit` is how the
 /// launcher asks the game things (Bridge.swift). Called on the main thread; the presenting waits a turn of the
 /// run loop, because at startup the game's view controller may not be on screen yet while its first frame is
@@ -27,9 +30,10 @@ private func present(attempts: Int) {
         return
     }
     // Already up: a second request (Quit Game pressed twice) changes nothing.
-    if root is LauncherHostingController {
+    if root is LauncherHostingController || presentationPending {
         return
     }
+    presentationPending = true
     let host = LauncherHostingController(rootView: AnyView(EmptyView()))
     let home = AnyView(
         HomeView(onPlay: { [weak host] in
@@ -37,9 +41,11 @@ private func present(attempts: Int) {
             GameAudio.start()
             let scene = host.view.window?.windowScene
             host.dismiss(animated: true) {
-                // Back to the game's landscape (its own view controller allows nothing else).
-                turn(scene, to: .landscape)
-                Task { _ = await Bridge.send("launcher-visible false") }
+                Task { @MainActor in
+                    // The window allows only landscape again before the phone turns back.
+                    _ = await Bridge.send("launcher-visible false")
+                    turn(scene, to: .landscape)
+                }
             }
         })
 
@@ -61,10 +67,20 @@ private func present(attempts: Int) {
     }
     host.modalPresentationStyle = .fullScreen
     host.modalTransitionStyle = .crossDissolve
-    root.present(host, animated: false) {
-        Task { _ = await Bridge.send("launcher-visible true") }
-        // Upright for the intro, and for the launcher's own design on every device.
-        turn(host.view.window?.windowScene, to: .portrait)
+    Task { @MainActor in
+        // iOS 16 keeps the game's landscape geometry when presentation and rotation race the
+        // underlying controller's supported-mask change: let the window allow portrait first.
+        _ = await Bridge.send("launcher-visible true")
+        guard root.view.window != nil else {
+            presentationPending = false
+            _ = await Bridge.send("launcher-visible false")
+            return
+        }
+        root.present(host, animated: false) {
+            presentationPending = false
+            // Upright for the intro, and for the launcher's own design on every device.
+            turn(host.view.window?.windowScene, to: .portrait)
+        }
     }
 }
 
@@ -73,13 +89,16 @@ func turn(_ scene: UIWindowScene?, to orientations: UIInterfaceOrientationMask) 
     guard let scene else { return }
     if #available(iOS 16.0, *) {
         for window in scene.windows {
+            window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
             var top = window.rootViewController
             while let next = top?.presentedViewController {
                 top = next
             }
             top?.setNeedsUpdateOfSupportedInterfaceOrientations()
         }
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientations)) { _ in }
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientations)) { error in
+            NSLog("Horizon orientation request failed: %@", error.localizedDescription)
+        }
     } else {
         // iOS 15 has no scene geometry request: UIKit turns when a view controller that supports the
         // orientations is presented, and asks again after this nudge.
