@@ -334,10 +334,17 @@ fn sample_memory() -> MemoryUse {
     }
 }
 
+// `mach_task_self_` (`mach/mach_init.h`), the calling task's own Mach port.
+// libc binds it on macOS only, though every Apple platform's libSystem exports
+// it (the `mach_task_self()` macro is this variable).
+#[cfg(target_vendor = "apple")]
+unsafe extern "C" {
+    static mach_task_self_: libc::mach_port_t;
+}
+
 /// `task_info(TASK_VM_INFO).phys_footprint`, the memory the system charges the
 /// process, compressed pages included (libc has `task_info` but not the struct).
 #[cfg(target_vendor = "apple")]
-#[allow(deprecated)] // libc points at mach2, whose task_info this crate would also call
 fn footprint() -> Option<usize> {
     /// `task_vm_info_data_t` through `phys_footprint`, its stable prefix
     /// (mach/task_info.h): the kernel fills as many fields as `count` covers.
@@ -367,13 +374,14 @@ fn footprint() -> Option<usize> {
     }
     const TASK_VM_INFO: libc::task_flavor_t = 22;
     // SAFETY: zeroed is a valid TaskVmInfo, and task_info writes at most the
-    // number of integers `count` asks for, which is this struct's size.
+    // number of integers `count` asks for, which is this struct's size; the
+    // static is libSystem's own task port, set before the program starts.
     let mut info: TaskVmInfo = unsafe { std::mem::zeroed() };
     let mut count = (std::mem::size_of::<TaskVmInfo>() / std::mem::size_of::<libc::natural_t>())
         as libc::mach_msg_type_number_t;
     let result = unsafe {
         libc::task_info(
-            libc::mach_task_self_,
+            mach_task_self_,
             TASK_VM_INFO,
             (&raw mut info).cast::<libc::integer_t>(),
             &mut count,
