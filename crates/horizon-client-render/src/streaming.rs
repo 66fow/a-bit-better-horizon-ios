@@ -17,7 +17,7 @@ use std::{
     collections::{BinaryHeap, HashSet, VecDeque},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, RwLock, TryLockError,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
 };
@@ -240,6 +240,9 @@ struct Shared {
     /// Workers that have freed their buffers ([`IDLE_RELEASE`]) and taken no
     /// job since: the last of them gives the freed memory back to the OS.
     released: AtomicUsize,
+    /// Bumped by [`Streaming::release_memory`]: each worker that has not seen
+    /// the current value frees its buffers now, without the idle wait.
+    trim: AtomicU64,
 }
 #[derive(Default)]
 struct MeshPool {
@@ -264,6 +267,34 @@ impl MeshPool {
         self.bytes += bytes;
         self.meshes.push(mesh);
         None
+    }
+}
+
+/// Free what a worker keeps between jobs — its generator's buffers, the mesher's
+/// face cache and scratch — and, once every worker has, the pooled mesh capacity
+/// and the allocator's free pages. `released` counts the workers in this state and
+/// taking a job takes one out, so the last one to free is the one that hands the
+/// memory back. The caller drops the queue lock first.
+fn release_worker<G: ChunkGenerator>(
+    generator: &G,
+    worker: &mut G::Worker,
+    faces: &mut Option<(Arc<MeshTables>, FaceVisibility)>,
+    mesh_scratch: &mut MeshScratch,
+    shared: &Shared,
+    workers: usize,
+    released: &mut bool,
+) {
+    generator.idle(worker);
+    *faces = None;
+    *mesh_scratch = MeshScratch::default();
+    *released = true;
+    // The allocator keeps freed pages until memory runs short: once every
+    // worker has freed its own, hand them back.
+    if shared.released.fetch_add(1, Ordering::Relaxed) + 1 == workers {
+        // No worker needs retained mesh capacity now. Drop it outside the pool
+        // lock before asking the allocator to return freed pages.
+        drop(std::mem::take(&mut *shared.meshes.lock().unwrap()));
+        horizon_threads::release_free_memory();
     }
 }
 
@@ -567,6 +598,7 @@ impl Streaming {
             done: Mailbox::default(),
             meshes: Mutex::new(MeshPool::default()),
             released: AtomicUsize::new(0),
+            trim: AtomicU64::new(0),
         });
         let workers = threads.max(1);
         let light_tables = context.light.clone();
@@ -587,6 +619,7 @@ impl Streaming {
                         // cloning it per job copied every state and face shape.
                         let mut faces: Option<(Arc<MeshTables>, FaceVisibility)> = None;
                         let mut mesh_scratch = MeshScratch::default();
+                        let mut seen_trim = 0u64;
                         loop {
                             let job = {
                                 let mut queue = shared.queue.lock().unwrap();
@@ -601,6 +634,26 @@ impl Streaming {
                                         }
                                         break job.job;
                                     }
+                                    let trim = shared.trim.load(Ordering::Relaxed);
+                                    if trim != seen_trim {
+                                        seen_trim = trim;
+                                        // A memory warning while the world runs: free what
+                                        // the idle wait frees, without being idle.
+                                        if !released {
+                                            drop(queue);
+                                            release_worker(
+                                                &*generator,
+                                                &mut worker,
+                                                &mut faces,
+                                                &mut mesh_scratch,
+                                                &shared,
+                                                workers,
+                                                &mut released,
+                                            );
+                                            queue = shared.queue.lock().unwrap();
+                                        }
+                                        continue;
+                                    }
                                     if released {
                                         queue = shared.ready.wait(queue).unwrap();
                                         continue;
@@ -614,24 +667,15 @@ impl Streaming {
                                         // face cache and scratch) until the next job
                                         // needs them.
                                         drop(queue);
-                                        generator.idle(&mut worker);
-                                        faces = None;
-                                        mesh_scratch = MeshScratch::default();
-                                        released = true;
-                                        // The allocator keeps freed pages until memory
-                                        // runs short: once every worker has freed its own,
-                                        // hand them back.
-                                        if shared.released.fetch_add(1, Ordering::Relaxed) + 1
-                                            == workers
-                                        {
-                                            // No worker needs retained mesh capacity now.
-                                            // Drop it outside the pool lock before asking
-                                            // the allocator to return freed pages.
-                                            let meshes =
-                                                std::mem::take(&mut *shared.meshes.lock().unwrap());
-                                            drop(meshes);
-                                            horizon_threads::release_free_memory();
-                                        }
+                                        release_worker(
+                                            &*generator,
+                                            &mut worker,
+                                            &mut faces,
+                                            &mut mesh_scratch,
+                                            &shared,
+                                            workers,
+                                            &mut released,
+                                        );
                                         queue = shared.queue.lock().unwrap();
                                     }
                                 }
@@ -836,6 +880,12 @@ impl Streaming {
         if !meshes.is_empty() {
             self.submit(None, 0, Job::Free(meshes));
         }
+    }
+    /// A memory warning: every worker gives back what it keeps between jobs
+    /// without waiting for [`IDLE_RELEASE`]; loaded chunks stay.
+    pub fn release_memory(&self) {
+        self.shared.trim.fetch_add(1, Ordering::Relaxed);
+        self.shared.ready.notify_all();
     }
     /// A column the server unloaded (ClientboundForgetLevelChunkPacket).
     pub fn forget(&mut self, world: &mut World, x: i32, z: i32) -> Option<Arc<Chunk>> {

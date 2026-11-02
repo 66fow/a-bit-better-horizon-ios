@@ -252,6 +252,158 @@ fn release() {
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_vendor = "apple")))]
 fn release() {}
 
+/// The process's memory, in bytes. `footprint` is `phys_footprint`, the figure
+/// iOS' Jetsam compares against the device's limit (compressed pages included);
+/// `rss` and `peak_rss` are the allocator's view; `available` is how much more
+/// the app may allocate before the system terminates it, when the OS says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryUse {
+    pub footprint: usize,
+    pub rss: usize,
+    pub peak_rss: usize,
+    pub available: Option<usize>,
+}
+
+impl MemoryUse {
+    /// The debug screen's and the Video page's line: the footprint, its peak
+    /// where the allocator reports one, and the headroom where the OS does.
+    pub fn line(&self) -> String {
+        let mut line = format!("Memory: {} used", bytes(self.footprint));
+        if self.peak_rss > 0 {
+            line.push_str(&format!(" (peak {})", bytes(self.peak_rss)));
+        }
+        if let Some(available) = self.available {
+            line.push_str(&format!(", {} headroom", bytes(available)));
+        }
+        line
+    }
+}
+
+fn bytes(bytes: usize) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= 1024.0 * MIB {
+        format!("{:.1} GiB", bytes / (1024.0 * MIB))
+    } else {
+        format!("{:.0} MiB", bytes / MIB)
+    }
+}
+
+/// [`MemoryUse`], sampled at most once a second: the debug overlay and the
+/// options screen read it every frame.
+pub fn memory_use() -> MemoryUse {
+    use std::{
+        sync::Mutex,
+        time::{Duration, Instant},
+    };
+    const TTL: Duration = Duration::from_secs(1);
+    static CACHE: Mutex<Option<(Instant, MemoryUse)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    if let Some((at, use_)) = *cache
+        && now.duration_since(at) < TTL
+    {
+        return use_;
+    }
+    let use_ = sample_memory();
+    *cache = Some((now, use_));
+    use_
+}
+
+fn sample_memory() -> MemoryUse {
+    let (mut rss, mut peak_rss) = (0, 0);
+    // SAFETY: every argument but the two out-parameters is a null pointer,
+    // which mimalloc documents as "do not report".
+    unsafe {
+        libmimalloc_sys::mi_process_info(
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut rss,
+            &mut peak_rss,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+    }
+    MemoryUse {
+        footprint: footprint().unwrap_or(rss),
+        rss,
+        peak_rss,
+        available: available_memory(),
+    }
+}
+
+/// `task_info(TASK_VM_INFO).phys_footprint`, the memory the system charges the
+/// process, compressed pages included (libc has `task_info` but not the struct).
+#[cfg(target_vendor = "apple")]
+#[allow(deprecated)] // libc points at mach2, whose task_info this crate would also call
+fn footprint() -> Option<usize> {
+    /// `task_vm_info_data_t` through `phys_footprint`, its stable prefix
+    /// (mach/task_info.h): the kernel fills as many fields as `count` covers.
+    #[repr(C)]
+    #[allow(dead_code)] // the kernel writes every field; only the last is read.
+    struct TaskVmInfo {
+        virtual_size: u64,
+        region_count: i32,
+        page_size: i32,
+        resident_size: u64,
+        resident_size_peak: u64,
+        device: u64,
+        device_peak: u64,
+        internal: u64,
+        internal_peak: u64,
+        external: u64,
+        external_peak: u64,
+        reusable: u64,
+        reusable_peak: u64,
+        purgeable_volatile_pmap: u64,
+        purgeable_volatile_resident: u64,
+        purgeable_volatile_virtual: u64,
+        compressed: u64,
+        compressed_peak: u64,
+        compressed_lifetime: u64,
+        phys_footprint: u64,
+    }
+    const TASK_VM_INFO: libc::task_flavor_t = 22;
+    // SAFETY: zeroed is a valid TaskVmInfo, and task_info writes at most the
+    // number of integers `count` asks for, which is this struct's size.
+    let mut info: TaskVmInfo = unsafe { std::mem::zeroed() };
+    let mut count = (std::mem::size_of::<TaskVmInfo>() / std::mem::size_of::<libc::natural_t>())
+        as libc::mach_msg_type_number_t;
+    let result = unsafe {
+        libc::task_info(
+            libc::mach_task_self_,
+            TASK_VM_INFO,
+            (&raw mut info).cast::<libc::integer_t>(),
+            &mut count,
+        )
+    };
+    (result == libc::KERN_SUCCESS).then_some(info.phys_footprint as usize)
+}
+
+#[cfg(not(target_vendor = "apple"))]
+fn footprint() -> Option<usize> {
+    None
+}
+
+/// `os_proc_available_memory`: the app's remaining budget before the system
+/// terminates it, or 0 where the OS does not say.
+#[cfg(target_os = "ios")]
+fn available_memory() -> Option<usize> {
+    unsafe extern "C" {
+        fn os_proc_available_memory() -> usize;
+    }
+    // SAFETY: returns the calling app's own budget; no pointers or state.
+    let bytes = unsafe { os_proc_available_memory() };
+    (bytes > 0).then_some(bytes)
+}
+
+#[cfg(not(target_os = "ios"))]
+fn available_memory() -> Option<usize> {
+    None
+}
+
 /// The REPARSE_DATA_BUFFER of a mount point naming `name` (UTF-16, `\??\` prefixed). The length
 /// fields are 16 bits: a name too long for them is an error, so the caller copies instead.
 #[cfg(windows)]

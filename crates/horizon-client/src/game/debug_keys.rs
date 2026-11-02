@@ -432,6 +432,9 @@ impl Game<'_> {
         {
             d.group("system", [r.hdr_line()]);
         }
+        // Horizon's own: what the process holds as iOS accounts it
+        // (`phys_footprint`), and on iOS what is left before Jetsam.
+        d.group("system", [horizon_threads::memory_use().line()]);
         // Horizon's own: the shader pack's GPU time per pass (an empty group would move others).
         let pass_lines = self.renderer.as_ref().map_or_else(Vec::new, |r| {
             debug_overlay::shader_pass_lines(&r.shader_pass_times())

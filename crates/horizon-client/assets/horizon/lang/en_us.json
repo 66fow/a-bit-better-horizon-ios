@@ -1,4 +1,5 @@
 {
+  "options.graphics.low": "Low",
   "horizon.options.controller": "Controller",
   "horizon.options.vibration": "Vibration",
   "horizon.options.adaptive_triggers": "Adaptive Triggers",

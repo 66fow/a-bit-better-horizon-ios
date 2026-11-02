@@ -326,7 +326,7 @@ impl Loading {
     /// running game, where a change also applies at once).
     fn launcher_options(&mut self, line: &str) -> Value {
         let words: Vec<&str> = line.split_whitespace().collect();
-        let mut file = self.settings.to_file();
+        let file = self.settings.to_file();
         if words[0] == "options-get" {
             let mut options = serde_json::Map::new();
             for key in &words[1..] {
@@ -346,15 +346,13 @@ impl Loading {
             .and_then(|rest| rest.trim_start().strip_prefix(key))
             .map(str::trim)
             .unwrap_or_default();
-        if let Err(e) = file.set_text(key, value) {
-            return json!({ "error": e });
-        }
-        let mut settings = horizon_client::settings::Settings::from_file(file);
-        // Horizon's own files are not in options.txt.
-        std::mem::swap(&mut settings.horizon, &mut self.settings.horizon);
-        std::mem::swap(&mut settings.controller, &mut self.settings.controller);
-        std::mem::swap(&mut settings.extras, &mut self.settings.extras);
-        self.settings = settings;
+        // Horizon's own files are not in options.txt: with_option keeps them.
+        // A graphics preset also applies its options there, as the options
+        // screen's slider does.
+        self.settings = match self.settings.with_option(key, value) {
+            Ok(settings) => settings,
+            Err(e) => return json!({ "error": e }),
+        };
         self.settings.save(
             &std::env::current_dir()
                 .unwrap_or_default()

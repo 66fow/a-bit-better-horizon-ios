@@ -166,6 +166,7 @@ mod loom;
 mod mace;
 mod machines;
 mod maps;
+mod memory;
 mod minecarts;
 mod mob_blocks;
 mod mob_gear;
@@ -2348,6 +2349,9 @@ struct Game<'a> {
     lan: Option<lan::LanHost>,
     /// Single player's server thread, which `remote` is connected to.
     integrated: Option<integrated::Integrated>,
+    /// The memory warnings' count and whether the render distance is lowered
+    /// (game/memory.rs).
+    memory: memory::Memory,
     /// The shapes of the open world's levels, from its dimension types.
     level_shapes: horizon_client::chunk::LevelShapes,
     /// This game is that server thread's (game/integrated.rs).
@@ -12417,7 +12421,7 @@ impl Game<'_> {
         // LocalPlayer.refreshChatAbilities: the chat shows what the Chat option allows.
         let abilities = self.chat_abilities();
         self.ui.chat.set_abilities(&self.gui.atlas.font, abilities);
-        self.streaming.radius = self.settings.render_distance;
+        self.streaming.radius = self.memory.effective(self.settings.render_distance);
         // Options.biomeBlendRadius, ambientOcclusion and cutoutLeaves:
         // LevelExtractor.allChanged when they change.
         let (s, st) = (&self.settings, &self.streaming);
@@ -12438,6 +12442,57 @@ impl Game<'_> {
             std::sync::atomic::Ordering::Relaxed,
         );
         self.apply_ui_settings();
+    }
+    /// A memory warning (iOS `applicationDidReceiveMemoryWarning`): give back
+    /// what can be given back, and lower the render distance when the warnings
+    /// come close together in a singleplayer world at a long distance.
+    fn on_memory_warning(&mut self, now: Instant) {
+        self.streaming.release_memory();
+        horizon_threads::release_free_memory();
+        // A remote server's chunks are not ours to unload, and without a world
+        // (or a player) there is no render distance in use. The warning still
+        // counts: while lowered, it postpones the restore.
+        let second = self.memory.note_warning(now);
+        if self.player.is_none() || self.integrated.is_none() || self.memory.is_lowered() {
+            return;
+        }
+        if self.settings.render_distance <= memory::LOWER_ABOVE || !second {
+            return;
+        }
+        self.memory.lower();
+        self.apply_memory_radius();
+        self.system_message(horizon_client::text::Text::literal(format!(
+            "Running low on memory: render distance lowered to {} until the pressure passes",
+            memory::LOWER_RADIUS
+        )));
+    }
+    /// The restore side of [`Game::on_memory_warning`], once a quiet while has
+    /// passed; leaving the world forgets the lowering.
+    fn memory_tick(&mut self, now: Instant) {
+        if self.player.is_none() {
+            let lowered = self.memory.is_lowered();
+            self.memory.close_world();
+            if lowered {
+                self.streaming.radius = self.settings.render_distance;
+            }
+            return;
+        }
+        if self.memory.is_lowered() {
+            // A dimension change or a view distance packet sets the radius
+            // again: the lowering holds until it is restored.
+            self.apply_memory_radius();
+        }
+        if self.memory.restore_due(now) {
+            self.memory.restore();
+            self.apply_memory_radius();
+            self.system_message(horizon_client::text::Text::literal(format!(
+                "Memory pressure gone: render distance restored to {}",
+                self.settings.render_distance
+            )));
+        }
+    }
+    fn apply_memory_radius(&mut self) {
+        self.streaming.radius = self.memory.effective(self.settings.render_distance);
     }
     /// `LevelExtractor.allChanged`: every loaded section is rebuilt.
     fn all_sections_changed(&mut self) {
@@ -14583,6 +14638,7 @@ impl Game<'_> {
         }
         self.tick_server_packs();
         self.poll_control(event_loop);
+        self.memory_tick(Instant::now());
         if !self.splitscreen.guest {
             self.poll_launcher(event_loop);
             self.sync_airplay();
@@ -15699,7 +15755,7 @@ impl Game<'_> {
                             self.splitscreen.active,
                         ));
                         server.set_distances(
-                            self.settings.render_distance,
+                            self.memory.effective(self.settings.render_distance),
                             self.settings.simulation_distance,
                             self.settings.entity_distance,
                         );
@@ -15890,6 +15946,10 @@ impl ApplicationHandler for Game<'_> {
         if !self.splitscreen.guest {
             self.poll_splitscreen(event_loop);
         }
+    }
+    /// iOS `applicationDidReceiveMemoryWarning`.
+    fn memory_warning(&mut self, _event_loop: &ActiveEventLoop) {
+        self.on_memory_warning(Instant::now());
     }
     /// The application is ending. On macOS, Quit (Cmd+Q) ends it through
     /// applicationWillTerminate without a CloseRequested; vanilla's GLFW
@@ -16310,6 +16370,7 @@ impl<'a> Game<'a> {
             remote: None,
             lan: None,
             integrated: None,
+            memory: Default::default(),
             level_shapes: Default::default(),
             serving: None,
             world_options: None,
@@ -17665,6 +17726,12 @@ impl Loading {
             }
         }
     }
+    /// iOS `applicationDidReceiveMemoryWarning` while the resources load: no
+    /// world is open yet, so the allocator's free pages are all there is to
+    /// give back.
+    fn on_memory_warning(&mut self) {
+        horizon_threads::release_free_memory();
+    }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // The loop may run once more after exit(): keep the first error, the
         // one that ended loading.
@@ -17912,6 +17979,12 @@ impl App {
             game.device_event(event_loop, id, event);
         }
     }
+    fn memory_warning_here(&mut self) {
+        match self {
+            App::Loading(loading) => loading.on_memory_warning(),
+            App::Ready(game) => game.on_memory_warning(Instant::now()),
+        }
+    }
     fn about_to_wait_here(&mut self, event_loop: &ActiveEventLoop) {
         enum Step {
             Waiting,
@@ -18064,6 +18137,10 @@ impl ApplicationHandler for App {
     }
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
         deep(|| self.exiting_here(event_loop))
+    }
+    fn memory_warning(&mut self, event_loop: &ActiveEventLoop) {
+        let _ = event_loop;
+        deep(|| self.memory_warning_here())
     }
 }
 

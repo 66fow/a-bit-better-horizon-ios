@@ -125,7 +125,7 @@ pub struct Settings {
     pub entity_distance: f32,
     pub entity_shadows: bool,
     pub biome_blend: i32,
-    /// "fast", "fancy", "fabulous" or "custom".
+    /// "low", "fast", "fancy", "fabulous" or "custom".
     pub graphics_preset: String,
     pub mipmap_levels: i32,
     pub weather_radius: i32,
@@ -635,14 +635,20 @@ impl Settings {
     pub fn with_option(&self, key: &str, value: &str) -> Result<Self, String> {
         let mut file = self.to_file();
         file.set_text(key, value)?;
-        Ok(Self {
+        let mut settings = Self {
             horizon: self.horizon.clone(),
             controller: self.controller.clone(),
             touch: self.touch.clone(),
             extras: self.extras.clone(),
             mods: self.mods.clone(),
             ..Self::from_file(file)
-        })
+        };
+        // Options.applyGraphicsPreset: a new preset's own options are applied
+        // at once, as the options screen's slider does (options_ui::set_slider).
+        if key == "graphicsPreset" && settings.graphics_preset != self.graphics_preset {
+            crate::options_ui::apply_preset(&mut settings);
+        }
+        Ok(settings)
     }
     /// The `options.txt` text (Options.save).
     pub fn serialize(&self) -> String {
@@ -845,6 +851,23 @@ mod tests {
         assert_eq!(set.controller, s.controller);
         assert_eq!(set.touch, s.touch);
         assert!(s.with_option("fov", "200").is_err());
+    }
+    #[test]
+    fn setting_the_graphics_preset_applies_its_options() {
+        let mut s = Settings::parse("graphicsPreset:custom\n");
+        s.graphics_preset = "custom".into();
+        s.render_distance = 16;
+        let low = s.with_option("graphicsPreset", "low").unwrap();
+        assert_eq!(low.graphics_preset, "low");
+        assert_eq!(low.render_distance, 6);
+        assert_eq!(low.simulation_distance, 5);
+        // The same preset again is not a change (Options' listener only runs then).
+        let same = low.with_option("graphicsPreset", "low").unwrap();
+        assert_eq!(same.render_distance, 6);
+        // Custom closes the preset: it applies nothing.
+        let custom = low.with_option("graphicsPreset", "custom").unwrap();
+        assert_eq!(custom.graphics_preset, "custom");
+        assert_eq!(custom.render_distance, 6);
     }
     #[test]
     fn gui_scale_survives_temporary_small_framebuffer() {

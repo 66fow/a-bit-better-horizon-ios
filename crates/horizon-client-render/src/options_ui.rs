@@ -353,7 +353,11 @@ impl Opt {
             Opt::CloudRange => unit(s.cloud_range as f32, 2.0, 128.0),
             Opt::EntityDistance => unit(s.entity_distance, 0.5, 5.0),
             Opt::BiomeBlend => unit(s.biome_blend as f32, 0.0, 7.0),
-            Opt::Preset => unit(preset_index(&s.graphics_preset) as f32, 0.0, 3.0),
+            Opt::Preset => unit(
+                preset_index(&s.graphics_preset) as f32,
+                0.0,
+                PRESETS.len() as f32 - 1.0,
+            ),
             Opt::Mipmaps => unit(s.mipmap_levels as f32, 0.0, 4.0),
             Opt::MaxAnisotropy => unit(s.file.int("maxAnisotropyBit") as f32, 1.0, 3.0),
             Opt::ExclusiveMode => {
@@ -826,7 +830,10 @@ impl Opt {
             Opt::CloudRange => s.cloud_range = step(2.0, 128.0) as i32,
             Opt::EntityDistance => s.entity_distance = step(2.0, 20.0) / 4.0,
             Opt::BiomeBlend => s.biome_blend = step(0.0, 7.0) as i32,
-            Opt::Preset => s.graphics_preset = PRESETS[step(0.0, 3.0) as usize].into(),
+            Opt::Preset => {
+                s.graphics_preset =
+                    PRESETS[step(0.0, PRESETS.len() as f32 - 1.0) as usize].into()
+            }
             Opt::Mipmaps => s.mipmap_levels = step(0.0, 4.0) as i32,
             Opt::MaxAnisotropy => s.file.set(
                 "maxAnisotropyBit",
@@ -1104,9 +1111,9 @@ impl Opt {
         }
     }
 }
-const PRESETS: [&str; 4] = ["fast", "fancy", "fabulous", "custom"];
+const PRESETS: [&str; 5] = ["low", "fast", "fancy", "fabulous", "custom"];
 fn preset_index(p: &str) -> usize {
-    PRESETS.iter().position(|x| *x == p).unwrap_or(1)
+    PRESETS.iter().position(|x| *x == p).unwrap_or(2)
 }
 /// A slider moved to `v` (OptionInstance.set): the graphics preset applies
 /// its options when its value changes (`Options.applyGraphicsPreset`).
@@ -1135,10 +1142,30 @@ fn drag_slider(opt: Opt, s: &mut Settings, v: f32, events: &mut Vec<Event>) {
         events.push(Event::Volume(source, after));
     }
 }
-/// GraphicsPreset.apply: the options Fast, Fancy and Fabulous set.
+/// GraphicsPreset.apply: the options Low, Fast, Fancy and Fabulous set.
 pub fn apply_preset(s: &mut Settings) {
     let fabulous = s.graphics_preset == "fabulous";
     match s.graphics_preset.as_str() {
+        // Below vanilla's Fast: the preset a phone under memory pressure picks.
+        "low" => {
+            s.biome_blend = 0;
+            s.render_distance = 6;
+            s.prioritize_chunk_updates = 0;
+            s.simulation_distance = 5;
+            s.smooth_lighting = false;
+            s.clouds = "false".into();
+            s.particles = 2;
+            s.mipmap_levels = 2;
+            s.entity_shadows = false;
+            s.entity_distance = 0.5;
+            s.menu_blur = 0;
+            s.cloud_range = 32;
+            s.cutout_leaves = false;
+            s.improved_transparency = false;
+            s.weather_radius = 5;
+            // The option's own floor is 2x; filtering off makes it inert.
+            set_filtering(s, 1, 0);
+        }
         "fast" => {
             s.biome_blend = 1;
             s.render_distance = 8;
@@ -1994,6 +2021,7 @@ impl OptionsUi {
                 ]));
                 rows.push(Row::Header("options.video.quality.header"));
                 rows.push(Row::Big(Opt::Preset));
+                rows.push(Row::Note(horizon_threads::memory_use().line()));
                 rows.extend(pairs(&[
                     Opt::BiomeBlend,
                     Opt::RenderDistance,
@@ -5219,7 +5247,12 @@ mod tests {
     #[test]
     fn texture_filtering_rows_exist_and_the_presets_set_them() {
         let mut s = Settings::default();
-        for (preset, bit, filtering) in [("fast", 1, 0), ("fancy", 1, 1), ("fabulous", 2, 2)] {
+        for (preset, bit, filtering) in [
+            ("low", 1, 0),
+            ("fast", 1, 0),
+            ("fancy", 1, 1),
+            ("fabulous", 2, 2),
+        ] {
             s.graphics_preset = preset.into();
             apply_preset(&mut s);
             assert_eq!(s.file.int("maxAnisotropyBit"), bit, "{preset}");
@@ -5605,6 +5638,7 @@ mod tests {
         }
         ui.release();
         for expected in [
+            ("low", 6, 5, 32),
             ("fast", 8, 6, 32),
             ("fancy", 16, 12, 64),
             ("fabulous", 32, 12, 128),

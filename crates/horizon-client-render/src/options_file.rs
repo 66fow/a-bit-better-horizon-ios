@@ -86,7 +86,7 @@ const MODEL_PARTS: [&str; 7] = [
     "hat",
 ];
 const GRAPHICS_BACKEND: &[&str] = &["default", "opengl", "vulkan"];
-const GRAPHICS_PRESET: &[&str] = &["fast", "fancy", "fabulous", "custom"];
+const GRAPHICS_PRESET: &[&str] = &["low", "fast", "fancy", "fabulous", "custom"];
 /// Horizon's render distance cap (vanilla stops at 32): the server protocol's
 /// view distance tops out at 127 anyway.
 pub const MAX_RENDER_DISTANCE: i32 = 128;
@@ -143,7 +143,7 @@ static TABLE: LazyLock<Vec<Def>> = LazyLock::new(|| {
         u("glintSpeed", 0.5),
         u("glintStrength", 0.75),
         n("preferredGraphicsBackend", GRAPHICS_BACKEND, 0),
-        n("graphicsPreset", GRAPHICS_PRESET, 1),
+        n("graphicsPreset", GRAPHICS_PRESET, 2),
         id("prioritizeChunkUpdates", 3, 0),
         b("fullscreen", false),
         b("exclusiveFullscreen", false),
