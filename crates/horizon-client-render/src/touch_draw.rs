@@ -19,7 +19,8 @@ pub fn draw_control(
     shadowed(r, |r, color| glyph(batch, atlas, control, r, color));
 }
 
-/// A player's button: vanilla's button behind the name of its key ("NEW" until mapped).
+/// A player's button: its name ("NEW" until named) over vanilla's sprite, or over the solid background
+/// and inside the stroke color the player picked.
 pub fn draw_custom(
     batch: &mut HudBatch,
     atlas: &HudAtlas,
@@ -27,8 +28,28 @@ pub fn draw_custom(
     r: Rect,
     held: bool,
     opacity: f32,
+    background: Option<u32>,
+    stroke: Option<u32>,
 ) {
-    draw_button(batch, atlas, r, held, opacity);
+    let opacity = opacity.clamp(0.0, 1.0);
+    match background {
+        Some(color) => {
+            let alpha = ((if held { 230.0 } else { 200.0 }) * opacity) as u8;
+            batch.fill(atlas, r[0], r[1], r[2], r[3], with_alpha(color, alpha));
+            if held {
+                batch.fill(atlas, r[0], r[1], r[2], r[3], rgba(255, 255, 255, 40));
+            }
+        }
+        None => draw_button(batch, atlas, r, held, opacity),
+    }
+    if let Some(color) = stroke {
+        let t = (r[2].min(r[3]) / 16.0).round().clamp(1.0, 3.0);
+        let color = with_alpha(color, (255.0 * opacity) as u8);
+        batch.fill(atlas, r[0], r[1], r[2], t, color);
+        batch.fill(atlas, r[0], r[1] + r[3] - t, r[2], t, color);
+        batch.fill(atlas, r[0], r[1], t, r[3], color);
+        batch.fill(atlas, r[0] + r[2] - t, r[1], t, r[3], color);
+    }
     crate::ui::centered_text(
         batch,
         atlas,
@@ -38,6 +59,11 @@ pub fn draw_custom(
         r[2] - 4.0,
         rgba(255, 255, 255, 255),
     );
+}
+
+/// A color from [`crate::touch::COLORS`] at a new alpha.
+fn with_alpha(color: u32, alpha: u8) -> u32 {
+    (color & 0x00FF_FFFF) | u32::from(alpha) << 24
 }
 
 /// The analog stick: a dark disc, a light ring, and a thumb that follows the finger. `analog` is the
@@ -56,7 +82,13 @@ pub fn draw_stick(
         return;
     }
     let alpha = (if held { 150.0 } else { 110.0 }) * opacity.clamp(0.0, 1.0);
-    disc(batch, atlas, (cx, cy), radius * 0.94, rgba(24, 24, 24, (alpha * 0.55) as u8));
+    disc(
+        batch,
+        atlas,
+        (cx, cy),
+        radius * 0.94,
+        rgba(24, 24, 24, (alpha * 0.55) as u8),
+    );
     ring(
         batch,
         atlas,
@@ -213,6 +245,17 @@ fn glyph(batch: &mut HudBatch, atlas: &HudAtlas, control: Control, r: Rect, colo
         Control::Pause => {
             cell(batch, -2.0, -2.5, 1.5, 5.0);
             cell(batch, 0.5, -2.5, 1.5, 5.0);
+        }
+        // Hide HUD: a frame with a slash through it.
+        Control::HideHud => {
+            cell(batch, -3.5, -2.5, 7.0, 1.0);
+            cell(batch, -3.5, 1.5, 7.0, 1.0);
+            cell(batch, -3.5, -2.5, 1.0, 5.0);
+            cell(batch, 2.5, -2.5, 1.0, 5.0);
+            for i in 0..5 {
+                let i = i as f32;
+                cell(batch, -2.5 + i, 2.0 - i, 1.0, 1.0);
+            }
         }
         // The inventory: three dots, as Pocket Edition's button beside the hotbar.
         Control::Inventory => {

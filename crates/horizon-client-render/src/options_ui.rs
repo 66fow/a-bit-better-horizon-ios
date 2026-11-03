@@ -38,14 +38,24 @@ fn on_off(v: bool) -> Text {
 fn set_touch_slider(s: &mut Settings, id: u16, field: TouchField, v: f32) {
     let v = v.clamp(0.0, 1.0);
     let (lo, hi) = match field {
-        TouchField::Scale => (crate::touch::MIN_SCALE, crate::touch::MAX_SCALE),
+        TouchField::Width | TouchField::Height => (crate::touch::MIN_SIZE, crate::touch::MAX_SIZE),
         TouchField::Opacity => (crate::touch::MIN_OPACITY, 1.0),
     };
     let value = ((lo + v * (hi - lo)) * 100.0).round() / 100.0;
+    let (width, height) = s
+        .touch
+        .button(id)
+        .map_or((1.0, 1.0), |b| (b.width, b.height));
     match field {
-        TouchField::Scale => s.touch.set_button_scale(id, value),
+        TouchField::Width => s.touch.set_button_size(id, value, height),
+        TouchField::Height => s.touch.set_button_size(id, width, value),
         TouchField::Opacity => s.touch.set_button_opacity(id, value),
     }
+}
+/// Where a button's width or height sits on its slider (0..1).
+fn size_slider(side: f32) -> f32 {
+    ((side - crate::touch::MIN_SIZE) / (crate::touch::MAX_SIZE - crate::touch::MIN_SIZE))
+        .clamp(0.0, 1.0)
 }
 fn chat_px(caption: &str, px: f32) -> Text {
     Text::translate(
@@ -831,8 +841,7 @@ impl Opt {
             Opt::EntityDistance => s.entity_distance = step(2.0, 20.0) / 4.0,
             Opt::BiomeBlend => s.biome_blend = step(0.0, 7.0) as i32,
             Opt::Preset => {
-                s.graphics_preset =
-                    PRESETS[step(0.0, PRESETS.len() as f32 - 1.0) as usize].into()
+                s.graphics_preset = PRESETS[step(0.0, PRESETS.len() as f32 - 1.0) as usize].into()
             }
             Opt::Mipmaps => s.mipmap_levels = step(0.0, 4.0) as i32,
             Opt::MaxAnisotropy => s.file.set(
@@ -1269,8 +1278,8 @@ pub enum Page {
     TouchLayout,
     /// A player's own touch button's options: its id in `touch.buttons`.
     TouchOptions(u16),
-    /// Choosing the key a player's own touch button sends: its id.
-    TouchKey(u16),
+    /// Choosing one of the keys a player's own touch button sends: its id and the key's slot.
+    TouchKey(u16, usize),
     Extras,
     /// CreditsAndAttributionScreen.
     Credits,
@@ -1313,11 +1322,16 @@ enum Act {
     CopyAgentDetails,
     /// Put the touch overlay's buttons back in their default places.
     TouchReset,
-    /// A player's own touch button: add one, map its key, clear its key (the Options/Delete popup is
-    /// handled where it is drawn).
+    /// A player's own touch button: add one, map one of its keys, clear that key (the Options/Delete
+    /// popup is handled where it is drawn).
     TouchAdd,
-    TouchSetKey(u16, &'static str),
-    TouchClearKey(u16),
+    TouchSetKey(u16, usize, &'static str),
+    TouchClearKey(u16, usize),
+    /// A player's own touch button's switches and colors: toggle, swipe, and the background or stroke
+    /// color (the bool is the stroke).
+    TouchToggle(u16),
+    TouchSwipe(u16),
+    TouchColor(u16, bool),
 }
 enum WKind {
     Button {
@@ -1342,18 +1356,21 @@ enum WKind {
     },
     /// A touch button where the overlay puts it: dragged on the Touch Controls editor.
     TouchControl(crate::touch::Control),
-    /// A player's own touch button's size or opacity, on its options page.
+    /// A player's own touch button's width, height or opacity, on its options page.
     TouchSlider {
         id: u16,
         field: TouchField,
         label: Text,
         value: f32,
     },
+    /// Where a player's own touch button's name is typed (the box is drawn with the search boxes).
+    TouchName,
 }
 /// Which setting a [`WKind::TouchSlider`] sets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TouchField {
-    Scale,
+    Width,
+    Height,
     Opacity,
 }
 struct Widget {
@@ -1435,6 +1452,10 @@ pub struct OptionsUi {
     touch_popup: Option<u16>,
     /// The player's own touch button's slider being dragged during a frame (it saves on release).
     dragging_custom: Option<(u16, TouchField)>,
+    /// The name field of a player's own touch button's options page.
+    touch_name: ui::EditBox,
+    /// The button whose name `touch_name` edits; `None` with no such page open.
+    touch_name_id: Option<u16>,
     /// The pressed slider's own position (`AbstractSliderButton.value`) and
     /// when it last moved: the handle follows the pointer while the option
     /// keeps its stepped value, then snaps to it (`resetValue`).
@@ -1486,6 +1507,9 @@ impl Default for OptionsUi {
         search.max_length = 32;
         let mut settings_search = ui::EditBox::new(0.0, 0.0, 200.0, 15.0);
         settings_search.focused = false;
+        let mut touch_name = ui::EditBox::new(0.0, 0.0, 310.0, 20.0);
+        touch_name.focused = false;
+        touch_name.max_length = crate::touch::MAX_NAME;
         Self {
             stack: vec![Page::Main],
             scroll: 0.0,
@@ -1494,6 +1518,8 @@ impl Default for OptionsUi {
             touch_press: None,
             touch_popup: None,
             dragging_custom: None,
+            touch_name,
+            touch_name_id: None,
             slider_value: None,
             scrollbar_drag_y: None,
             selected_key: None,
@@ -1618,6 +1644,7 @@ impl OptionsUi {
                 .pack_screen
                 .as_ref()
                 .is_some_and(|p| p.search_focused()),
+            Page::TouchOptions(_) => self.touch_name.focused,
             _ => false,
         }
     }
@@ -1630,6 +1657,13 @@ impl OptionsUi {
             &self.settings_search
         } else if self.page() == Page::Packs {
             return self.pack_screen.as_ref().and_then(|p| p.search_rect());
+        } else if matches!(self.page(), Page::TouchOptions(_)) {
+            return self.touch_name.focused.then_some([
+                self.touch_name.x,
+                self.touch_name.y,
+                self.touch_name.width,
+                self.touch_name.height,
+            ]);
         } else {
             return None;
         };
@@ -1712,6 +1746,8 @@ impl OptionsUi {
         self.touch_press = None;
         self.touch_popup = None;
         self.dragging_custom = None;
+        self.touch_name.focused = false;
+        self.touch_name_id = None;
     }
     fn push(&mut self, page: Page) {
         self.stack.push(page);
@@ -1721,6 +1757,8 @@ impl OptionsUi {
         self.touch_press = None;
         self.touch_popup = None;
         self.dragging_custom = None;
+        self.touch_name.focused = false;
+        self.touch_name_id = None;
         if matches!(page, Page::Video | Page::Controls | Page::KeyBinds) {
             self.settings_search.set_value("");
             self.settings_search.focused = false;
@@ -1739,6 +1777,18 @@ impl OptionsUi {
         ) {
             self.graphics.reset();
         }
+    }
+    /// Write the name field into its button's setting; whether it changed.
+    fn commit_touch_name(&mut self, s: &mut Settings) -> bool {
+        let Some(id) = self.touch_name_id else {
+            return false;
+        };
+        let name = self.touch_name.value.clone();
+        let changed = s.touch.button(id).is_some_and(|b| b.name != name);
+        if changed {
+            s.touch.set_button_name(id, name);
+        }
+        changed
     }
     /// The graphics screen level of `page`, if it is one.
     fn graphics_level(page: Page) -> Option<crate::graphics_ui::Level> {
@@ -1772,7 +1822,7 @@ impl OptionsUi {
             Page::PadBinds => "horizon.pages.controller_binds",
             Page::Touch | Page::TouchLayout => "Touch Controls",
             Page::TouchOptions(_) => "Button Options",
-            Page::TouchKey(_) => "Choose Key",
+            Page::TouchKey(..) => "Choose Key",
             Page::Extras => "horizon.pages.extras",
             Page::Credits => "credits_and_attribution.screen.title",
             Page::Horizon => "horizon.pages.settings",
@@ -2172,12 +2222,18 @@ impl OptionsUi {
                 let Some(custom) = s.touch.button(id) else {
                     return vec![Row::Note("This button was deleted.".to_owned())];
                 };
-                let mapping = match s.touch.button_key_name(id) {
-                    Some(key) if keybinds::mouse_button(key).is_some() => {
-                        Text::literal(s.touch.button_label(id))
-                    }
-                    Some(key) => keybinds::display_name(key),
+                let mapping = |slot: usize| match s.touch.button_key_name(id, slot) {
+                    Some(key) => Text::literal(crate::touch::key_label(key)),
                     None => Text::literal("Not Set"),
+                };
+                let map = |slot: usize| {
+                    button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        Text::literal(format!("Key {}: ", slot + 1)).append(mapping(slot)),
+                        Act::Push(Page::TouchKey(id, slot)),
+                    )
                 };
                 let slider = |field, label: Text, value: f32| Widget {
                     x: 0.0,
@@ -2192,30 +2248,56 @@ impl OptionsUi {
                     },
                     list: false,
                 };
+                let size = |field, caption: &str, side: f32| {
+                    let mut widget = slider(
+                        field,
+                        Text::literal(format!("{caption}: {}%", (side * 100.0).round() as i32)),
+                        size_slider(side),
+                    );
+                    // The two sit side by side: the row places it at 150 wide.
+                    widget.w = 150.0;
+                    widget
+                };
+                let color = |stroke: bool, color: Option<u32>| {
+                    button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        Text::literal(format!(
+                            "{}: {}",
+                            if stroke { "Stroke" } else { "Background" },
+                            crate::touch::color_name(color)
+                        )),
+                        Act::TouchColor(id, stroke),
+                    )
+                };
+                let switch = |caption: &str, on: bool, act| {
+                    button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        Text::literal(format!("{caption}: {}", if on { "On" } else { "Off" })),
+                        act,
+                    )
+                };
                 vec![
-                    Row::Note(format!("Button: {}", s.touch.button_label(id))),
+                    Row::Note("Keys are pressed in order; release is in reverse.".to_owned()),
                     Row::Buttons(
-                        button(
-                            0.0,
-                            0.0,
-                            310.0,
-                            Text::literal("Mapping Key: ").append(mapping),
-                            Act::Push(Page::TouchKey(id)),
-                        ),
+                        Widget {
+                            x: 0.0,
+                            y: 0.0,
+                            w: 310.0,
+                            h: 20.0,
+                            kind: WKind::TouchName,
+                            list: false,
+                        },
                         None,
                     ),
+                    Row::Buttons(map(0), Some(map(1))),
+                    Row::Buttons(map(2), Some(map(3))),
                     Row::Buttons(
-                        slider(
-                            TouchField::Scale,
-                            Text::literal(format!(
-                                "Size: {}%",
-                                (custom.scale * 100.0).round() as i32
-                            )),
-                            ((custom.scale - crate::touch::MIN_SCALE)
-                                / (crate::touch::MAX_SCALE - crate::touch::MIN_SCALE))
-                                .clamp(0.0, 1.0),
-                        ),
-                        None,
+                        size(TouchField::Width, "Width", custom.width),
+                        Some(size(TouchField::Height, "Height", custom.height)),
                     ),
                     Row::Buttons(
                         slider(
@@ -2230,15 +2312,24 @@ impl OptionsUi {
                         ),
                         None,
                     ),
+                    Row::Buttons(
+                        switch("Toggle", custom.toggle, Act::TouchToggle(id)),
+                        Some(switch("Swipe", custom.swipe, Act::TouchSwipe(id))),
+                    ),
+                    Row::Buttons(
+                        color(false, custom.background),
+                        Some(color(true, custom.stroke)),
+                    ),
                 ]
             }
-            Page::TouchKey(id) => {
+            Page::TouchKey(id, slot) => {
                 if s.touch.button(id).is_none() {
                     return vec![Row::Note("This button was deleted.".to_owned())];
                 }
                 let mut rows = vec![
                     Row::Note(format!(
-                        "Choose the key \"{}\" sends.",
+                        "Choosing key {} of \"{}\".",
+                        slot + 1,
                         s.touch.button_label(id)
                     )),
                     Row::Buttons(
@@ -2247,7 +2338,7 @@ impl OptionsUi {
                             0.0,
                             310.0,
                             Text::literal("Clear Key"),
-                            Act::TouchClearKey(id),
+                            Act::TouchClearKey(id, slot),
                         ),
                         None,
                     ),
@@ -2258,14 +2349,14 @@ impl OptionsUi {
                             0.0,
                             150.0,
                             Text::literal("Left Click"),
-                            Act::TouchSetKey(id, crate::touch::MOUSE_KEYS[0]),
+                            Act::TouchSetKey(id, slot, crate::touch::MOUSE_KEYS[0]),
                         ),
                         Some(button(
                             0.0,
                             0.0,
                             150.0,
                             Text::literal("Right Click"),
-                            Act::TouchSetKey(id, crate::touch::MOUSE_KEYS[1]),
+                            Act::TouchSetKey(id, slot, crate::touch::MOUSE_KEYS[1]),
                         )),
                     ),
                 ];
@@ -2275,7 +2366,7 @@ impl OptionsUi {
                         0.0,
                         150.0,
                         keybinds::display_name(chunk[0].0),
-                        Act::TouchSetKey(id, chunk[0].0),
+                        Act::TouchSetKey(id, slot, chunk[0].0),
                     );
                     let two = chunk.get(1).map(|(name, _)| {
                         button(
@@ -2283,7 +2374,7 @@ impl OptionsUi {
                             0.0,
                             150.0,
                             keybinds::display_name(name),
-                            Act::TouchSetKey(id, name),
+                            Act::TouchSetKey(id, slot, name),
                         )
                     });
                     rows.push(Row::Buttons(one, two));
@@ -2856,6 +2947,21 @@ impl OptionsUi {
                 if matches!(page, Page::Video | Page::Controls) {
                     top = 38.0;
                 }
+                // The name of a player's touch button: typed here, written to the setting when the
+                // field loses the focus.
+                if let Page::TouchOptions(id) = page {
+                    let name = s
+                        .touch
+                        .button(id)
+                        .map_or_else(String::new, |b| b.name.clone());
+                    if self.touch_name_id != Some(id) {
+                        self.touch_name_id = Some(id);
+                        self.touch_name.focused = false;
+                        self.touch_name.set_value(&name);
+                    } else if !self.touch_name.focused && self.touch_name.value != name {
+                        self.touch_name.set_value(&name);
+                    }
+                }
                 out.push(Widget {
                     x: 0.0,
                     y: if matches!(page, Page::Video | Page::Controls) {
@@ -2963,6 +3069,10 @@ impl OptionsUi {
             if widget.list {
                 widget.y += previous_scroll - self.scroll;
             }
+        }
+        if let Some(wd) = out.iter().find(|w| matches!(&w.kind, WKind::TouchName)) {
+            self.touch_name.x = wd.x;
+            self.touch_name.y = wd.y;
         }
         (out, top, bottom, content)
     }
@@ -3235,15 +3345,18 @@ impl OptionsUi {
                             s.touch.opacity * s.touch.stick_opacity,
                         );
                     } else if let crate::touch::Control::Custom(id) = control {
-                        let own = s.touch.button(*id).map_or(1.0, |b| b.opacity);
-                        crate::touch_draw::draw_custom(
-                            batch,
-                            atlas,
-                            &s.touch.button_label(*id),
-                            rect,
-                            held,
-                            s.touch.opacity * own,
-                        );
+                        if let Some(button) = s.touch.button(*id) {
+                            crate::touch_draw::draw_custom(
+                                batch,
+                                atlas,
+                                &s.touch.button_label(*id),
+                                rect,
+                                held,
+                                s.touch.opacity * button.opacity,
+                                button.background,
+                                button.stroke,
+                            );
+                        }
                     } else {
                         crate::touch_draw::draw_control(
                             batch,
@@ -3275,6 +3388,7 @@ impl OptionsUi {
                         dragging,
                     );
                 }
+                WKind::TouchName => {}
             }
             if wd.list && (wd.y < top || wd.y + wd.h > bottom) {
                 batch.clip_since(start, 0.0, top, w, bottom);
@@ -3341,6 +3455,24 @@ impl OptionsUi {
                 );
             }
             self.settings_search = search;
+        }
+        if matches!(self.page(), Page::TouchOptions(_))
+            && self.touch_name.y >= top
+            && self.touch_name.y + self.touch_name.height <= bottom
+        {
+            let mut name = self.touch_name.clone();
+            name.draw(batch, atlas, None);
+            if name.value.is_empty() && !name.focused {
+                batch.text_styled(
+                    atlas,
+                    &Text::literal("Name").with_color(text::GRAY).italic(),
+                    name.text_x(),
+                    name.text_y(),
+                    u32::MAX,
+                    true,
+                );
+            }
+            self.touch_name = name;
         }
         if let Some(lines) = tooltip {
             ui::tooltip(batch, atlas, &lines, cursor);
@@ -3437,6 +3569,34 @@ impl OptionsUi {
         }
         let (widgets, top, bottom, content) = self.layout(s, size.0, size.1);
         let mut events = Vec::new();
+        // A player's touch button's name: a press focuses the field (typing goes there), a press
+        // anywhere else writes what was typed and lets the field go.
+        if !drag && matches!(self.page(), Page::TouchOptions(_)) {
+            let name = &mut self.touch_name;
+            if y >= top
+                && y < bottom
+                && ui::hovered((x, y), name.x, name.y, name.width, name.height)
+            {
+                if !name.focused {
+                    name.focused = true;
+                    name.reset_blink();
+                    // The first press picks the whole name, so typing replaces it.
+                    name.move_cursor_to_end(false);
+                    name.highlight = 0;
+                    events.push(Event::ButtonClick);
+                    return events;
+                }
+                name.click(atlas, x, false, false);
+                events.push(Event::ButtonClick);
+                return events;
+            }
+            if name.focused {
+                name.focused = false;
+                if self.commit_touch_name(s) {
+                    events.push(Event::Changed);
+                }
+            }
+        }
         if !drag && self.page() == Page::Language {
             // LanguageScreen's search box: a press inside it focuses it (the caret shows and a phone's
             // keyboard comes up), anywhere else takes the focus away. Silent, as vanilla's rows are.
@@ -3583,6 +3743,11 @@ impl OptionsUi {
                     events.push(Event::ButtonClick);
                     match act {
                         Act::Push(p) => {
+                            if matches!(self.page(), Page::TouchOptions(_))
+                                && self.commit_touch_name(s)
+                            {
+                                events.push(Event::Changed);
+                            }
                             if p == Page::ShaderPacks {
                                 events.push(Event::ListShaderPacks);
                             }
@@ -3655,13 +3820,40 @@ impl OptionsUi {
                             s.touch.add_button(size.0, size.1);
                             events.push(Event::Changed);
                         }
-                        Act::TouchSetKey(id, name) => {
-                            s.touch.set_button_key(id, Some(name.to_owned()));
+                        Act::TouchSetKey(id, slot, name) => {
+                            s.touch.set_button_key(id, slot, Some(name.to_owned()));
                             events.extend(self.back(s));
                         }
-                        Act::TouchClearKey(id) => {
-                            s.touch.set_button_key(id, None);
+                        Act::TouchClearKey(id, slot) => {
+                            s.touch.set_button_key(id, slot, None);
                             events.extend(self.back(s));
+                        }
+                        Act::TouchToggle(id) => {
+                            if let Some(button) = s.touch.button(id) {
+                                s.touch.set_button_toggle(id, !button.toggle);
+                                events.push(Event::Changed);
+                            }
+                        }
+                        Act::TouchSwipe(id) => {
+                            if let Some(button) = s.touch.button(id) {
+                                s.touch.set_button_swipe(id, !button.swipe);
+                                events.push(Event::Changed);
+                            }
+                        }
+                        Act::TouchColor(id, stroke) => {
+                            if let Some(button) = s.touch.button(id) {
+                                let color = if stroke {
+                                    button.stroke
+                                } else {
+                                    button.background
+                                };
+                                s.touch.set_button_color(
+                                    id,
+                                    stroke,
+                                    crate::touch::cycle_color(color),
+                                );
+                                events.push(Event::Changed);
+                            }
                         }
                         Act::None => {}
                     }
@@ -3906,6 +4098,12 @@ impl OptionsUi {
                     events.push(Event::Language(code));
                 }
             }
+            Page::TouchOptions(_) => {
+                // Leaving the page keeps what was typed in the name field.
+                self.commit_touch_name(s);
+                self.touch_name.focused = false;
+                self.touch_name_id = None;
+            }
             Page::Packs => {
                 // PackSelectionScreen.onClose: PackSelectionModel.commit.
                 let data = self.data_pack_dir.take();
@@ -3947,6 +4145,8 @@ impl OptionsUi {
         } else if self.settings_search_active() {
             self.settings_search.insert_text(text);
             self.scroll = 0.0;
+        } else if matches!(self.page(), Page::TouchOptions(_)) && self.touch_name.focused {
+            self.touch_name.insert_text(text);
         }
     }
     /// Ctrl+A/C/V/X in the language or pack search box; false when neither
@@ -3976,6 +4176,10 @@ impl OptionsUi {
             if self.settings_search.shortcut(shortcut, clipboard) {
                 self.scroll = 0.0;
             }
+            return true;
+        }
+        if matches!(self.page(), Page::TouchOptions(_)) && self.touch_name.focused {
+            self.touch_name.shortcut(shortcut, clipboard);
             return true;
         }
         false
@@ -4059,6 +4263,25 @@ impl OptionsUi {
                     .to_owned()
             };
             return self.bind_key(s, value);
+        }
+        if matches!(self.page(), Page::TouchOptions(_)) && self.touch_name.focused {
+            if matches!(key, K::Escape | K::Enter | K::NumpadEnter) {
+                self.touch_name.focused = false;
+                return if self.commit_touch_name(s) {
+                    vec![Event::Changed]
+                } else {
+                    Vec::new()
+                };
+            }
+            if !self.touch_name.key(key, false, false)
+                && let Some(t) = text
+            {
+                let typed: String = t.chars().filter(|c| !c.is_control()).collect();
+                if !typed.is_empty() {
+                    self.touch_name.insert_text(&typed);
+                }
+            }
+            return Vec::new();
         }
         if key == K::Escape {
             return self.back(s);
@@ -4467,9 +4690,9 @@ mod tests {
                 matches!(
                     w.kind,
                     WKind::Button {
-                        act: Act::Push(Page::TouchKey(k)),
+                        act: Act::Push(Page::TouchKey(k, slot)),
                         ..
-                    } if k == id
+                    } if k == id && slot == 0
                 )
             })
             .expect("the options page opens the key picker");
@@ -4483,7 +4706,7 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(ui.page(), Page::TouchKey(id));
+        assert_eq!(ui.page(), Page::TouchKey(id, 0));
         let (name, _) = keybinds::all_keys()[0];
         let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
         let key = widgets
@@ -4492,9 +4715,9 @@ mod tests {
                 matches!(
                     &w.kind,
                     WKind::Button {
-                        act: Act::TouchSetKey(k, n),
+                        act: Act::TouchSetKey(k, slot, n),
                         ..
-                    } if *k == id && *n == name
+                    } if *k == id && *slot == 0 && *n == name
                 )
             })
             .expect("the picker lists every key");
@@ -4510,10 +4733,9 @@ mod tests {
         );
         assert!(events.contains(&Event::Changed));
         assert_eq!(ui.page(), Page::TouchOptions(id));
-        assert_eq!(
-            s.touch.button_label(id),
-            keybinds::display_name(name).plain()
-        );
+        assert_eq!(s.touch.button_key_name(id, 0), Some(name));
+        // The name still says NEW until the player gives one.
+        assert_eq!(s.touch.button_label(id), "NEW");
     }
 
     #[test]
@@ -4531,9 +4753,9 @@ mod tests {
                 matches!(
                     &w.kind,
                     WKind::Button {
-                        act: Act::Push(Page::TouchKey(k)),
+                        act: Act::Push(Page::TouchKey(k, slot)),
                         ..
-                    } if *k == id
+                    } if *k == id && *slot == 0
                 )
             })
             .expect("the options page opens the key picker");
@@ -4547,7 +4769,7 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(ui.page(), Page::TouchKey(id));
+        assert_eq!(ui.page(), Page::TouchKey(id, 0));
         let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
         let click = widgets
             .iter()
@@ -4555,9 +4777,9 @@ mod tests {
                 matches!(
                     &w.kind,
                     WKind::Button {
-                        act: Act::TouchSetKey(k, "key.mouse.left"),
+                        act: Act::TouchSetKey(k, slot, "key.mouse.left"),
                         ..
-                    } if *k == id
+                    } if *k == id && *slot == 0
                 )
             })
             .expect("the picker lists the left click");
@@ -4573,10 +4795,11 @@ mod tests {
         );
         assert!(events.contains(&Event::Changed));
         assert_eq!(ui.page(), Page::TouchOptions(id));
-        assert_eq!(s.touch.button_label(id), "LMB");
         assert_eq!(
-            s.touch.button_mouse(id),
-            Some(winit::event::MouseButton::Left)
+            s.touch.button_mappings(id),
+            vec![crate::touch::CustomKey::Mouse(
+                winit::event::MouseButton::Left
+            )]
         );
         // And the options page names it the same way.
         let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
@@ -4585,43 +4808,47 @@ mod tests {
             .find_map(|w| match &w.kind {
                 WKind::Button {
                     label,
-                    act: Act::Push(Page::TouchKey(k)),
+                    act: Act::Push(Page::TouchKey(k, slot)),
                     ..
-                } if *k == id => Some(label),
+                } if *k == id && *slot == 0 => Some(label),
                 _ => None,
             })
             .expect("the options page lists the mapping");
-        assert_eq!(mapping.plain(), "Mapping Key: LMB");
+        assert_eq!(mapping.plain(), "Key 1: LMB");
+    }
+
+    fn touch_slider(ui: &mut OptionsUi, s: &Settings, id: u16, field: TouchField) -> Widget {
+        ui.layout(s, 480.0, 480.0)
+            .0
+            .into_iter()
+            .find(|w| {
+                matches!(
+                    w.kind,
+                    WKind::TouchSlider {
+                        id: i,
+                        field: f,
+                        ..
+                    } if i == id && f == field
+                )
+            })
+            .expect("the options page has the slider")
     }
 
     #[test]
-    fn a_buttons_sliders_change_its_size_and_opacity() {
+    fn a_buttons_sliders_change_its_width_height_and_opacity() {
         let atlas = atlas();
         let mut s = Settings::default();
         let id = s.touch.add_button(480.0, 480.0);
         let mut ui = OptionsUi::default();
         let size = (480.0, 480.0);
         ui.show(Page::TouchOptions(id));
-        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
-        let scale = widgets
-            .iter()
-            .find(|w| {
-                matches!(
-                    w.kind,
-                    WKind::TouchSlider {
-                        id: i,
-                        field: TouchField::Scale,
-                        ..
-                    } if i == id
-                )
-            })
-            .unwrap();
+        let width = touch_slider(&mut ui, &s, id, TouchField::Width);
         assert_eq!(
             ui.click(
                 &mut s,
                 &atlas,
-                scale.x + scale.w - 1.0,
-                scale.y + 4.0,
+                width.x + width.w - 1.0,
+                width.y + 4.0,
                 size,
                 [480, 480],
                 false,
@@ -4629,23 +4856,28 @@ mod tests {
             ),
             vec![Event::SliderDrag]
         );
-        assert_eq!(s.touch.button(id).unwrap().scale, crate::touch::MAX_SCALE);
+        // The width grows alone: the button is no longer forced square.
+        let button = s.touch.button(id).unwrap();
+        assert_eq!(button.width, crate::touch::MAX_SIZE);
+        assert_eq!(button.height, 1.0);
         let events = ui.release();
         assert!(events.contains(&Event::ButtonClick) && events.contains(&Event::Changed));
-        let (widgets, _, _, _) = ui.layout(&s, size.0, size.1);
-        let opacity = widgets
-            .iter()
-            .find(|w| {
-                matches!(
-                    w.kind,
-                    WKind::TouchSlider {
-                        id: i,
-                        field: TouchField::Opacity,
-                        ..
-                    } if i == id
-                )
-            })
-            .unwrap();
+        let height = touch_slider(&mut ui, &s, id, TouchField::Height);
+        ui.click(
+            &mut s,
+            &atlas,
+            height.x + 4.0,
+            height.y + 4.0,
+            size,
+            [480, 480],
+            false,
+            false,
+        );
+        let button = s.touch.button(id).unwrap();
+        assert_eq!(button.width, crate::touch::MAX_SIZE);
+        assert_eq!(button.height, crate::touch::MIN_SIZE);
+        ui.release();
+        let opacity = touch_slider(&mut ui, &s, id, TouchField::Opacity);
         ui.click(
             &mut s,
             &atlas,
@@ -4661,6 +4893,94 @@ mod tests {
             crate::touch::MIN_OPACITY
         );
         ui.release();
+    }
+
+    #[test]
+    fn a_buttons_name_is_typed_and_kept() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let id = s.touch.add_button(480.0, 480.0);
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::TouchOptions(id));
+        ui.layout(&s, size.0, size.1);
+        // The field starts empty, its placeholder saying "Name"; a press focuses it.
+        assert!(ui.touch_name.value.is_empty());
+        let (x, y) = (ui.touch_name.x + 4.0, ui.touch_name.y + 4.0);
+        assert_eq!(
+            ui.click(&mut s, &atlas, x, y, size, [480, 480], false, false),
+            vec![Event::ButtonClick]
+        );
+        assert!(ui.typing());
+        ui.type_text(&atlas, "Sprint");
+        // Enter writes it to the setting and lets the field go.
+        assert_eq!(
+            ui.key(&mut s, &atlas, winit::keyboard::KeyCode::Enter, None),
+            vec![Event::Changed]
+        );
+        assert!(!ui.typing());
+        assert_eq!(s.touch.button(id).unwrap().name, "Sprint");
+        assert_eq!(s.touch.button_label(id), "Sprint");
+        // Typing and clicking elsewhere does the same.
+        ui.click(&mut s, &atlas, x, y, size, [480, 480], false, false);
+        ui.type_text(&atlas, "Jump");
+        assert_eq!(
+            ui.click(&mut s, &atlas, 2.0, 2.0, size, [480, 480], false, false),
+            vec![Event::Changed]
+        );
+        assert_eq!(s.touch.button(id).unwrap().name, "Jump");
+        // Leaving the page keeps the name too.
+        ui.click(&mut s, &atlas, x, y, size, [480, 480], false, false);
+        ui.type_text(&atlas, "Swim");
+        ui.back(&mut s);
+        assert_eq!(s.touch.button(id).unwrap().name, "Swim");
+    }
+
+    #[test]
+    fn a_buttons_switches_and_colors_cycle() {
+        let atlas = atlas();
+        let mut s = Settings::default();
+        let id = s.touch.add_button(480.0, 480.0);
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 480.0);
+        ui.show(Page::TouchOptions(id));
+        let press = |ui: &mut OptionsUi, settings: &mut Settings, act: Act| {
+            let (widgets, _, _, _) = ui.layout(settings, size.0, size.1);
+            let wd = widgets
+                .iter()
+                .find(|w| matches!(&w.kind, WKind::Button { act: a, .. } if *a == act))
+                .expect("the options page has the button");
+            ui.click(
+                settings,
+                &atlas,
+                wd.x + 2.0,
+                wd.y + 2.0,
+                size,
+                [480, 480],
+                false,
+                false,
+            );
+        };
+        press(&mut ui, &mut s, Act::TouchToggle(id));
+        press(&mut ui, &mut s, Act::TouchSwipe(id));
+        let button = s.touch.button(id).unwrap();
+        assert!(button.toggle && button.swipe);
+        assert_eq!(button.background, None);
+        press(&mut ui, &mut s, Act::TouchColor(id, false));
+        assert_eq!(
+            s.touch.button(id).unwrap().background,
+            Some(crate::touch::COLORS[0].1)
+        );
+        press(&mut ui, &mut s, Act::TouchColor(id, true));
+        assert_eq!(
+            s.touch.button(id).unwrap().stroke,
+            Some(crate::touch::COLORS[0].1)
+        );
+        // Around the palette and back to the vanilla look.
+        for _ in 0..crate::touch::COLORS.len() {
+            press(&mut ui, &mut s, Act::TouchColor(id, false));
+        }
+        assert_eq!(s.touch.button(id).unwrap().background, None);
     }
 
     #[test]
@@ -4853,9 +5173,11 @@ mod tests {
             Control::Left,
             Control::Right,
         ] {
-            assert!(!widgets
-                .iter()
-                .any(|w| matches!(w.kind, WKind::TouchControl(c) if c == control)));
+            assert!(
+                !widgets
+                    .iter()
+                    .any(|w| matches!(w.kind, WKind::TouchControl(c) if c == control))
+            );
         }
         let (sx, sy, sw, sh) = rect_of(Control::Stick);
         let sneak = rect_of(Control::Sneak);

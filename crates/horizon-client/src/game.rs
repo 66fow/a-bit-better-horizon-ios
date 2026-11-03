@@ -7270,7 +7270,9 @@ impl Game<'_> {
         // the sleep overlay, debug screen and open screens still draw.
         let spectator = self.spectator();
         let (wi, hi) = (w as i32, h as i32);
-        let show_hud = !self.ui.hide_gui;
+        // The hide-HUD button hides the HUD, the touch controls with it; the controls still take
+        // touches where they were, so a remembered tap brings the HUD back.
+        let show_hud = !self.ui.hide_gui && !self.touch.hud_hidden;
         // max(Hud.leftHeight, Hud.rightHeight) after the bars: the item name and
         // the action bar sit above it.
         let mut bar_height = 39;

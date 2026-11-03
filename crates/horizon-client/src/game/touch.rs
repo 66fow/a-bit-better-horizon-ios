@@ -9,7 +9,7 @@ use horizon_client::{
     touch::{self, Control, Out, Touches},
     touch_draw,
 };
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeSet, time::Instant};
 use winit::{
     dpi::PhysicalPosition,
     event::{
@@ -38,19 +38,17 @@ pub(super) struct TouchInput {
     /// The button a finger held still on the world is holding down: attack to mine, or use to eat, drink or
     /// draw a bow.
     holding: Option<MouseButton>,
-    /// The key or mouse button each custom button sent while it is held, so its release sends the same
-    /// one even if the mapping changed meanwhile.
-    custom_keys: BTreeMap<u16, CustomKey>,
+    /// The keys and mouse buttons each custom button sent while it is held, in the order they were
+    /// pressed, so its release sends the same ones in reverse even if the mapping changed meanwhile.
+    custom_keys: std::collections::BTreeMap<u16, Vec<touch::CustomKey>>,
+    /// The toggle buttons that are holding their keys down.
+    toggled: BTreeSet<u16>,
+    /// The hide-HUD button was tapped: the HUD and this overlay are not drawn, but the buttons stay
+    /// where they were, so a finger that remembers them can bring the HUD back.
+    pub(super) hud_hidden: bool,
     /// The analog stick's `[left, forward]` while a finger holds it.
     analog: Option<[f32; 2]>,
     clock: Option<Instant>,
-}
-
-/// What a custom button sends, as its mapping says.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CustomKey {
-    Key(KeyCode),
-    Mouse(MouseButton),
 }
 
 /// A finger over a menu. Its press waits for a frame drawn with the pointer under it, and its release for a
@@ -80,7 +78,11 @@ fn key_of(control: Control) -> Option<KeyCode> {
         Control::Chat => KeyCode::KeyT,
         Control::Pause => KeyCode::Escape,
         Control::Inventory => KeyCode::KeyE,
-        Control::Sneak | Control::Hotbar(_) | Control::Custom(_) | Control::Stick => return None,
+        Control::HideHud
+        | Control::Sneak
+        | Control::Hotbar(_)
+        | Control::Custom(_)
+        | Control::Stick => return None,
     })
 }
 
@@ -206,7 +208,9 @@ impl Game<'_> {
         let out = match touch.phase {
             TouchPhase::Started => {
                 let now = self.touch_now();
-                self.touch.fingers.start(touch.id, at, now, &layout)
+                self.touch
+                    .fingers
+                    .start(touch.id, at, now, &layout, &self.settings.touch.swipes())
             }
             TouchPhase::Moved => self.touch.fingers.moved(touch.id, at, &layout),
             TouchPhase::Ended => self.touch.fingers.end(touch.id),
@@ -230,6 +234,10 @@ impl Game<'_> {
             self.touch_release_menu(event_loop);
         } else {
             self.touch_menu_frame(event_loop);
+            // A toggle left on must not keep its key held over a menu.
+            if let Err(e) = self.touch_release_toggles(event_loop) {
+                log::warn!("Horizon: touch: {e}");
+            }
         }
         let out = if playing {
             let now = self.touch_now();
@@ -303,6 +311,9 @@ impl Game<'_> {
                         self.mapped_key(KeyCode::ShiftLeft, !sneaking, false)?;
                     }
                 }
+                Out::Press(Control::HideHud) => {
+                    self.touch.hud_hidden = !self.touch.hud_hidden;
+                }
                 Out::Press(control) | Out::Release(control) => {
                     let pressed = matches!(o, Out::Press(_));
                     match control {
@@ -317,8 +328,7 @@ impl Game<'_> {
                     }
                 }
                 Out::Move(left, forward) => {
-                    self.touch.analog =
-                        (left.hypot(forward) > 1e-4).then_some([left, forward]);
+                    self.touch.analog = (left.hypot(forward) > 1e-4).then_some([left, forward]);
                 }
                 Out::Look(dx, dy) => {
                     self.touch_grab();
@@ -364,49 +374,72 @@ impl Game<'_> {
         self.touch.analog
     }
 
-    /// A player's button: its mapped key or mouse button, pressed and released as hardware would.
+    /// A player's button: its mapped keys and mouse buttons, pressed in order and released in reverse.
+    /// A toggle button holds them down until its next tap.
     fn touch_custom_key(
         &mut self,
         event_loop: &ActiveEventLoop,
         id: u16,
         pressed: bool,
     ) -> Result<()> {
-        if pressed {
-            if let Some(key) = self.touch_custom_mapping(id) {
-                self.touch.custom_keys.insert(id, key);
-                self.touch_custom_event(event_loop, key, ElementState::Pressed)?;
+        let toggle = self.settings.touch.button(id).is_some_and(|b| b.toggle);
+        if !pressed {
+            if toggle {
+                return Ok(());
             }
-        } else if let Some(key) = self
-            .touch
-            .custom_keys
-            .remove(&id)
-            .or_else(|| self.touch_custom_mapping(id))
-        {
+            return self.touch_release_custom(event_loop, id);
+        }
+        if toggle && self.touch.toggled.remove(&id) {
+            return self.touch_release_custom(event_loop, id);
+        }
+        // A second finger on the same button does not press its keys twice.
+        if self.touch.custom_keys.contains_key(&id) {
+            return Ok(());
+        }
+        if toggle {
+            self.touch.toggled.insert(id);
+        }
+        let keys = self.settings.touch.button_mappings(id);
+        self.touch.custom_keys.insert(id, keys.clone());
+        for key in keys {
+            self.touch_custom_event(event_loop, key, ElementState::Pressed)?;
+        }
+        Ok(())
+    }
+
+    /// Lets go of everything `id` pressed, in the reverse of the order it went down.
+    fn touch_release_custom(&mut self, event_loop: &ActiveEventLoop, id: u16) -> Result<()> {
+        let Some(keys) = self.touch.custom_keys.remove(&id) else {
+            return Ok(());
+        };
+        for key in keys.into_iter().rev() {
             self.touch_custom_event(event_loop, key, ElementState::Released)?;
         }
         Ok(())
     }
 
-    /// What the player mapped `id` to: a key, or one of Minecraft's two clicks.
-    fn touch_custom_mapping(&self, id: u16) -> Option<CustomKey> {
-        let touch = &self.settings.touch;
-        if let Some(button) = touch.button_mouse(id) {
-            return Some(CustomKey::Mouse(button));
+    /// Every toggle button lets go: a screen opened over the game, or the player left it.
+    fn touch_release_toggles(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let ids: Vec<u16> = std::mem::take(&mut self.touch.toggled)
+            .into_iter()
+            .collect();
+        for id in ids {
+            self.touch_release_custom(event_loop, id)?;
         }
-        touch.button_key_code(id).map(CustomKey::Key)
+        Ok(())
     }
 
     fn touch_custom_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        key: CustomKey,
+        key: touch::CustomKey,
         state: ElementState,
     ) -> Result<()> {
         match key {
-            CustomKey::Key(key) => self.synthetic_key(event_loop, key, state),
+            touch::CustomKey::Key(key) => self.synthetic_key(event_loop, key, state),
             // Directly, as a tap does: a touch screen never captures the pointer, so a `MouseInput`
             // event would be taken for a first click that only grabs and would act on nothing.
-            CustomKey::Mouse(button) => {
+            touch::CustomKey::Mouse(button) => {
                 if state == ElementState::Pressed {
                     self.touch_grab();
                 }
@@ -639,14 +672,18 @@ impl Game<'_> {
                 continue;
             }
             if let Control::Custom(id) = control {
-                let own = self.settings.touch.button(id).map_or(1.0, |b| b.opacity);
+                let Some(button) = self.settings.touch.button(id) else {
+                    continue;
+                };
                 touch_draw::draw_custom(
                     batch,
                     atlas,
                     &self.settings.touch.button_label(id),
                     r,
-                    self.touch.fingers.held(control),
-                    opacity * own,
+                    self.touch.fingers.held(control) || self.touch.toggled.contains(&id),
+                    opacity * button.opacity,
+                    button.background,
+                    button.stroke,
                 );
                 continue;
             }
@@ -740,6 +777,7 @@ impl Game<'_> {
                     Control::Perspective => "View".to_owned(),
                     Control::Chat => "Chat".to_owned(),
                     Control::Pause => "II".to_owned(),
+                    Control::HideHud => "HUD".to_owned(),
                     Control::Inventory => "•••".to_owned(),
                     Control::Hotbar(slot) => (slot + 1).to_string(),
                     Control::Custom(id) => self.settings.touch.button_label(id),
@@ -748,7 +786,8 @@ impl Game<'_> {
                 buttons.push(horizon_airplay::Button {
                     label,
                     rect: px(r),
-                    held: self.touch.fingers.held(control),
+                    held: self.touch.fingers.held(control)
+                        || matches!(control, Control::Custom(id) if self.touch.toggled.contains(&id)),
                 });
             }
         } else {
