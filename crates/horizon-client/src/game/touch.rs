@@ -212,7 +212,12 @@ impl Game<'_> {
                     .fingers
                     .start(touch.id, at, now, &layout, &self.settings.touch.swipes())
             }
-            TouchPhase::Moved => self.touch.fingers.moved(touch.id, at, &layout),
+            TouchPhase::Moved => self.touch.fingers.moved(
+                touch.id,
+                at,
+                &layout,
+                &self.settings.touch.swipes(),
+            ),
             TouchPhase::Ended => self.touch.fingers.end(touch.id),
             TouchPhase::Cancelled => self.touch.fingers.cancel(touch.id),
         };

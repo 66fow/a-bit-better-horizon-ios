@@ -1051,6 +1051,8 @@ enum Kind {
     World {
         dragged: bool,
         mining: bool,
+        /// A swipeable button the finger is gliding over, held until it leaves.
+        swiping: Option<Control>,
     },
     /// A player's swipeable button: its keys follow the finger in and out of the button.
     Swipe {
@@ -1110,6 +1112,7 @@ impl Touches {
             None => Kind::World {
                 dragged: false,
                 mining: false,
+                swiping: None,
             },
         };
         self.fingers.push(Finger {
@@ -1122,9 +1125,16 @@ impl Touches {
         out
     }
 
-    /// A finger moved: the D-pad follows it from direction to direction, and a finger on the world turns
-    /// the view.
-    pub fn moved(&mut self, id: u64, at: (f32, f32), layout: &[(Control, Rect)]) -> Vec<Out> {
+    /// A finger moved: the D-pad follows it from direction to direction, a finger on the world turns the
+    /// view and presses any swipeable button it glides over, and a swipeable button's keys follow the
+    /// finger in and out.
+    pub fn moved(
+        &mut self,
+        id: u64,
+        at: (f32, f32),
+        layout: &[(Control, Rect)],
+        swipes: &BTreeSet<Control>,
+    ) -> Vec<Out> {
         let Some(f) = self.fingers.iter_mut().find(|f| f.id == id) else {
             return Vec::new();
         };
@@ -1158,13 +1168,28 @@ impl Touches {
                     });
                 }
             }
-            Kind::World { dragged, .. } => {
+            Kind::World {
+                dragged,
+                swiping,
+                ..
+            } => {
                 let (dx, dy) = (at.0 - f.start.0, at.1 - f.start.1);
                 if !*dragged && dx.hypot(dy) > SLOP {
                     *dragged = true;
                 }
                 if *dragged {
                     out.push(Out::Look(at.0 - f.last.0, at.1 - f.last.1));
+                }
+                // Gliding over a swipeable button presses it without stopping the view.
+                let over = hit(layout, at).filter(|c| swipes.contains(c));
+                if over != *swiping {
+                    if let Some(old) = swiping.take() {
+                        out.push(Out::Release(old));
+                    }
+                    if let Some(next) = over {
+                        out.push(Out::Press(next));
+                    }
+                    *swiping = over;
                 }
             }
         }
@@ -1185,7 +1210,19 @@ impl Touches {
                 pressed: true,
             } => vec![Out::Release(control)],
             Kind::Swipe { .. } => Vec::new(),
-            Kind::World { mining: true, .. } => vec![Out::MineEnd],
+            Kind::World {
+                mining: true,
+                swiping,
+                ..
+            } => {
+                let mut out: Vec<Out> = swiping.into_iter().map(Out::Release).collect();
+                out.push(Out::MineEnd);
+                out
+            }
+            Kind::World {
+                swiping: Some(control),
+                ..
+            } => vec![Out::Release(control)],
             Kind::World { dragged: false, .. } => vec![Out::Tap],
             Kind::World { .. } => Vec::new(),
         }
@@ -1203,7 +1240,19 @@ impl Touches {
                 control,
                 pressed: true,
             } => vec![Out::Release(control)],
-            Kind::World { mining: true, .. } => vec![Out::MineEnd],
+            Kind::World {
+                mining: true,
+                swiping,
+                ..
+            } => {
+                let mut out: Vec<Out> = swiping.into_iter().map(Out::Release).collect();
+                out.push(Out::MineEnd);
+                out
+            }
+            Kind::World {
+                swiping: Some(control),
+                ..
+            } => vec![Out::Release(control)],
             Kind::World { .. } | Kind::Swipe { .. } => Vec::new(),
         }
     }
@@ -1215,6 +1264,7 @@ impl Touches {
             if let Kind::World {
                 dragged: false,
                 mining,
+                swiping: None,
             } = &mut f.kind
                 && !*mining
                 && now - f.since >= HOLD
@@ -1238,6 +1288,9 @@ impl Touches {
             Kind::Button(c) => c == control,
             Kind::Swipe { control: c, pressed } => pressed && c == control,
             Kind::Stick => control == Control::Stick,
+            Kind::World {
+                swiping: Some(c), ..
+            } => c == control,
             Kind::World { .. } => false,
         })
     }
@@ -1284,11 +1337,11 @@ mod tests {
         );
         assert!(t.held(Control::Forward));
         assert_eq!(
-            t.moved(1, at(&l, Control::Right), &l),
+            t.moved(1, at(&l, Control::Right), &l, NO_SWIPES),
             [Out::Release(Control::Forward), Out::Press(Control::Right)]
         );
         // Off the pad, the last direction stays held, as in Pocket Edition.
-        assert_eq!(t.moved(1, (300.0, 100.0), &l), []);
+        assert_eq!(t.moved(1, (300.0, 100.0), &l, NO_SWIPES), []);
         assert_eq!(t.end(1), [Out::Release(Control::Right)]);
         assert!(!t.held(Control::Right));
     }
@@ -1314,8 +1367,11 @@ mod tests {
         let mut t = Touches::default();
         t.start(1, (300.0, 100.0), 0.0, &l, NO_SWIPES);
         // Within the slop (a thumb's wobble): no look yet, and still a tap candidate.
-        assert_eq!(t.moved(1, (305.0, 100.0), &l), []);
-        assert_eq!(t.moved(1, (313.0, 104.0), &l), [Out::Look(8.0, 4.0)]);
+        assert_eq!(t.moved(1, (305.0, 100.0), &l, NO_SWIPES), []);
+        assert_eq!(
+            t.moved(1, (313.0, 104.0), &l, NO_SWIPES),
+            [Out::Look(8.0, 4.0)]
+        );
         assert_eq!(t.frame(5.0), []);
         assert_eq!(t.end(1), []);
     }
@@ -1326,7 +1382,10 @@ mod tests {
         let mut t = Touches::default();
         t.start(1, at(&l, Control::Forward), 0.0, &l, NO_SWIPES);
         t.start(2, (400.0, 100.0), 0.0, &l, NO_SWIPES);
-        assert_eq!(t.moved(2, (420.0, 100.0), &l), [Out::Look(20.0, 0.0)]);
+        assert_eq!(
+            t.moved(2, (420.0, 100.0), &l, NO_SWIPES),
+            [Out::Look(20.0, 0.0)]
+        );
         assert!(t.held(Control::Forward));
         let mut all = t.release_all();
         all.sort_by_key(|o| format!("{o:?}"));
@@ -1400,28 +1459,64 @@ mod tests {
         assert!(t.held(Control::Custom(id)));
         // ...lets go as soon as it slides off...
         assert_eq!(
-            t.moved(1, outside, &l),
+            t.moved(1, outside, &l, &swipes),
             [Out::Release(Control::Custom(id))]
         );
         assert!(!t.held(Control::Custom(id)));
         // ...and presses again on coming back.
         assert_eq!(
-            t.moved(1, centre, &l),
+            t.moved(1, centre, &l, &swipes),
             [Out::Press(Control::Custom(id))]
         );
         // Lifting inside releases; a finger that already slid off releases nothing.
         assert_eq!(t.end(1), [Out::Release(Control::Custom(id))]);
         t.start(2, centre, 1.0, &l, &swipes);
-        t.moved(2, outside, &l);
+        t.moved(2, outside, &l, &swipes);
         assert_eq!(t.end(2), []);
         // A cancelled finger lets go of what it held.
         t.start(3, centre, 2.0, &l, &swipes);
         assert_eq!(t.cancel(3), [Out::Release(Control::Custom(id))]);
         // A button that is not swipeable keeps its keys held even as the finger slides off.
         t.start(4, centre, 3.0, &l, NO_SWIPES);
-        assert_eq!(t.moved(4, outside, &l), []);
+        assert_eq!(t.moved(4, outside, &l, NO_SWIPES), []);
         assert!(t.held(Control::Custom(id)));
         assert_eq!(t.end(4), [Out::Release(Control::Custom(id))]);
+    }
+
+    #[test]
+    fn a_finger_gliding_over_a_swipe_button_presses_it_and_still_turns_the_view() {
+        let mut s = TouchSettings::default();
+        let id = s.add_button(633.0, 292.0);
+        s.set_button_swipe(id, true);
+        let l = s.layout(633.0, 292.0);
+        let r = placed(&l, Control::Custom(id));
+        let y = r[1] + r[3] / 2.0;
+        let start = (r[0] - 60.0, y);
+        let inside = (r[0] + 10.0, y);
+        let past = (r[0] + r[2] + 10.0, y);
+        let swipes = s.swipes();
+        let mut t = Touches::default();
+        // A finger that starts away from the buttons turns the view...
+        assert_eq!(t.start(1, start, 0.0, &l, &swipes), []);
+        // ...and presses a swipeable button as it glides onto it, still turning.
+        assert_eq!(
+            t.moved(1, inside, &l, &swipes),
+            [
+                Out::Look(inside.0 - start.0, 0.0),
+                Out::Press(Control::Custom(id))
+            ]
+        );
+        assert!(t.held(Control::Custom(id)));
+        // Gliding off lets go and keeps turning; lifting afterwards is not a tap.
+        assert_eq!(
+            t.moved(1, past, &l, &swipes),
+            [
+                Out::Look(past.0 - inside.0, 0.0),
+                Out::Release(Control::Custom(id))
+            ]
+        );
+        assert!(!t.held(Control::Custom(id)));
+        assert_eq!(t.end(1), []);
     }
 
     #[test]
@@ -1838,7 +1933,7 @@ mod tests {
         );
         assert!(t.held(Control::Stick));
         assert_eq!(
-            t.moved(1, (centre.0 - radius, centre.1), &l),
+            t.moved(1, (centre.0 - radius, centre.1), &l, NO_SWIPES),
             [Out::Move(1.0, 0.0)]
         );
         assert_eq!(t.end(1), [Out::Move(0.0, 0.0)]);
@@ -1854,7 +1949,10 @@ mod tests {
         let mut t = Touches::default();
         t.start(1, centre, 0.0, &l, NO_SWIPES);
         t.start(2, (400.0, 100.0), 0.0, &l, NO_SWIPES);
-        assert_eq!(t.moved(2, (420.0, 100.0), &l), [Out::Look(20.0, 0.0)]);
+        assert_eq!(
+            t.moved(2, (420.0, 100.0), &l, NO_SWIPES),
+            [Out::Look(20.0, 0.0)]
+        );
         assert!(t.held(Control::Stick));
         assert_eq!(t.release_all(), [Out::Move(0.0, 0.0)]);
     }
