@@ -172,7 +172,8 @@ pub struct CustomButton {
     pub opacity: f32,
     /// One tap holds the keys down, the next lets go.
     pub toggle: bool,
-    /// A drag turns the view; a tap sends the keys.
+    /// The keys are held only while the finger stays on the button: sliding off lets go, sliding back
+    /// presses again. Off, a press keeps its keys until the finger lifts.
     pub swipe: bool,
     /// A solid background color in place of vanilla's button sprite, and the stroke around it.
     pub background: Option<u32>,
@@ -954,7 +955,7 @@ impl TouchSettings {
             .filter_map(|name| CustomKey::of(name))
             .collect()
     }
-    /// The buttons whose drags turn the view instead.
+    /// The buttons that let go as soon as the finger leaves them.
     pub fn swipes(&self) -> BTreeSet<Control> {
         self.buttons
             .iter()
@@ -1051,10 +1052,10 @@ enum Kind {
         dragged: bool,
         mining: bool,
     },
-    /// A player's swipeable button: a drag turns the view, a tap sends its keys.
+    /// A player's swipeable button: its keys follow the finger in and out of the button.
     Swipe {
         control: Control,
-        dragged: bool,
+        pressed: bool,
     },
     /// The analog stick, wherever its rect is now (the layout may change under the finger).
     Stick,
@@ -1076,8 +1077,8 @@ pub struct Touches {
 }
 
 impl Touches {
-    /// A finger went down at `at`, `now` seconds into some clock. `swipes` are the buttons whose drags
-    /// turn the view instead of sending their keys.
+    /// A finger went down at `at`, `now` seconds into some clock. `swipes` are the buttons whose keys let
+    /// go when the finger slides off them.
     pub fn start(
         &mut self,
         id: u64,
@@ -1095,10 +1096,13 @@ impl Touches {
                 }
                 Kind::Stick
             }
-            Some(control) if swipes.contains(&control) => Kind::Swipe {
-                control,
-                dragged: false,
-            },
+            Some(control) if swipes.contains(&control) => {
+                out.push(Out::Press(control));
+                Kind::Swipe {
+                    control,
+                    pressed: true,
+                }
+            }
             Some(control) => {
                 out.push(Out::Press(control));
                 Kind::Button(control)
@@ -1140,7 +1144,21 @@ impl Touches {
                 }
             }
             Kind::Button(_) => {}
-            Kind::World { dragged, .. } | Kind::Swipe { dragged, .. } => {
+            Kind::Swipe { control, pressed } => {
+                let inside = layout
+                    .iter()
+                    .find(|(c, _)| c == control)
+                    .is_some_and(|(_, r)| contains(*r, at));
+                if inside != *pressed {
+                    *pressed = inside;
+                    out.push(if inside {
+                        Out::Press(*control)
+                    } else {
+                        Out::Release(*control)
+                    });
+                }
+            }
+            Kind::World { dragged, .. } => {
                 let (dx, dy) = (at.0 - f.start.0, at.1 - f.start.1);
                 if !*dragged && dx.hypot(dy) > SLOP {
                     *dragged = true;
@@ -1164,8 +1182,8 @@ impl Touches {
             Kind::Button(control) => vec![Out::Release(control)],
             Kind::Swipe {
                 control,
-                dragged: false,
-            } => vec![Out::Press(control), Out::Release(control)],
+                pressed: true,
+            } => vec![Out::Release(control)],
             Kind::Swipe { .. } => Vec::new(),
             Kind::World { mining: true, .. } => vec![Out::MineEnd],
             Kind::World { dragged: false, .. } => vec![Out::Tap],
@@ -1181,6 +1199,10 @@ impl Touches {
         match self.fingers.remove(i).kind {
             Kind::Stick => vec![Out::Move(0.0, 0.0)],
             Kind::Button(control) => vec![Out::Release(control)],
+            Kind::Swipe {
+                control,
+                pressed: true,
+            } => vec![Out::Release(control)],
             Kind::World { mining: true, .. } => vec![Out::MineEnd],
             Kind::World { .. } | Kind::Swipe { .. } => Vec::new(),
         }
@@ -1213,7 +1235,8 @@ impl Touches {
     /// A finger holds this button down (drawn pressed).
     pub fn held(&self, control: Control) -> bool {
         self.fingers.iter().any(|f| match f.kind {
-            Kind::Button(c) | Kind::Swipe { control: c, .. } => c == control,
+            Kind::Button(c) => c == control,
+            Kind::Swipe { control: c, pressed } => pressed && c == control,
             Kind::Stick => control == Control::Stick,
             Kind::World { .. } => false,
         })
@@ -1358,7 +1381,7 @@ mod tests {
     }
 
     #[test]
-    fn a_swipe_button_turns_the_view_and_a_tap_sends_its_keys() {
+    fn a_swipe_button_holds_its_keys_only_while_the_finger_is_on_it() {
         let mut s = TouchSettings::default();
         let id = s.add_button(633.0, 292.0);
         s.set_button_swipe(id, true);
@@ -1366,30 +1389,38 @@ mod tests {
         let l = s.layout(633.0, 292.0);
         let r = placed(&l, Control::Custom(id));
         let centre = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+        let outside = (r[0] + r[2] + 40.0, centre.1);
         let swipes = s.swipes();
         let mut t = Touches::default();
-        // A finger that drags turns the view, and sends no key when it lifts.
-        assert_eq!(t.start(1, centre, 0.0, &l, &swipes), []);
+        // A finger on it presses its keys...
+        assert_eq!(
+            t.start(1, centre, 0.0, &l, &swipes),
+            [Out::Press(Control::Custom(id))]
+        );
         assert!(t.held(Control::Custom(id)));
+        // ...lets go as soon as it slides off...
         assert_eq!(
-            t.moved(1, (centre.0 + 20.0, centre.1), &l),
-            [Out::Look(20.0, 0.0)]
+            t.moved(1, outside, &l),
+            [Out::Release(Control::Custom(id))]
         );
-        assert_eq!(t.end(1), []);
-        // A tap presses and releases its keys at once.
+        assert!(!t.held(Control::Custom(id)));
+        // ...and presses again on coming back.
+        assert_eq!(
+            t.moved(1, centre, &l),
+            [Out::Press(Control::Custom(id))]
+        );
+        // Lifting inside releases; a finger that already slid off releases nothing.
+        assert_eq!(t.end(1), [Out::Release(Control::Custom(id))]);
         t.start(2, centre, 1.0, &l, &swipes);
-        assert_eq!(
-            t.end(2),
-            [
-                Out::Press(Control::Custom(id)),
-                Out::Release(Control::Custom(id))
-            ]
-        );
-        // A cancelled tap sends nothing.
+        t.moved(2, outside, &l);
+        assert_eq!(t.end(2), []);
+        // A cancelled finger lets go of what it held.
         t.start(3, centre, 2.0, &l, &swipes);
-        assert_eq!(t.cancel(3), []);
-        // A button that is not swipeable holds its key while the finger is on it.
+        assert_eq!(t.cancel(3), [Out::Release(Control::Custom(id))]);
+        // A button that is not swipeable keeps its keys held even as the finger slides off.
         t.start(4, centre, 3.0, &l, NO_SWIPES);
+        assert_eq!(t.moved(4, outside, &l), []);
+        assert!(t.held(Control::Custom(id)));
         assert_eq!(t.end(4), [Out::Release(Control::Custom(id))]);
     }
 
