@@ -148,8 +148,8 @@ pub fn hit(layout: &[(Control, Rect)], at: (f32, f32)) -> Option<Control> {
 /// Horizon's touch overlay settings (`horizon-touch.txt`).
 pub const FILE: &str = "horizon-touch.txt";
 
-/// A button moved by the player: its top-left corner as fractions of the screen, so a layout survives a
-/// rotation or a different phone.
+/// A button moved by the player: its top-left corner as fractions of the space it can move in (the
+/// screen minus the button), so a layout survives a rotation, a resize or a change of the button's size.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
     pub x: f32,
@@ -233,9 +233,72 @@ pub const MIN_OPACITY: f32 = 0.2;
 /// How small and how large the buttons may grow.
 pub const MIN_SCALE: f32 = 0.75;
 pub const MAX_SCALE: f32 = 1.5;
-/// How small and how large a player's button may be drawn, on either side.
+/// How small and how large a button may be drawn, on either side.
 pub const MIN_SIZE: f32 = 0.5;
 pub const MAX_SIZE: f32 = 3.0;
+
+/// A built-in button's own width, height and opacity. Each button keeps its own, so resizing one never
+/// moves or fades another.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ButtonStyle {
+    /// Multipliers of the button's own size, `MIN_SIZE`..=`MAX_SIZE`.
+    pub width: f32,
+    pub height: f32,
+    /// `MIN_OPACITY`..=1.0, multiplied by the overlay's.
+    pub opacity: f32,
+}
+
+impl Default for ButtonStyle {
+    fn default() -> Self {
+        Self {
+            width: 1.0,
+            height: 1.0,
+            opacity: 1.0,
+        }
+    }
+}
+
+/// Whether a control takes a style of its own: the built-in buttons, but not the stick (the Touch
+/// Controls page sizes it), the hotbar (the HUD places it) or a player's buttons (they carry their own).
+pub fn styled(control: Control) -> bool {
+    matches!(
+        control,
+        Control::Forward
+            | Control::Back
+            | Control::Left
+            | Control::Right
+            | Control::Sneak
+            | Control::Jump
+            | Control::Perspective
+            | Control::Chat
+            | Control::Pause
+            | Control::HideHud
+            | Control::Inventory
+    )
+}
+
+/// Whether the player may turn a button off: the pause button is a phone's way back, and the hide-HUD
+/// button is how the HUD comes back.
+pub fn can_hide(control: Control) -> bool {
+    matches!(
+        control,
+        Control::Forward
+            | Control::Back
+            | Control::Left
+            | Control::Right
+            | Control::Sneak
+            | Control::Jump
+            | Control::Perspective
+            | Control::Chat
+            | Control::Inventory
+    )
+}
+
+/// Whether the editor's long press opens the button's own popup: everything but the hotbar (the HUD
+/// places it) and the stick (sized on the Touch Controls page).
+pub fn editable(control: Control) -> bool {
+    !matches!(control, Control::Hotbar(_) | Control::Stick)
+}
 
 /// The colors a button's background and stroke can take, with the names the options page shows. Packed as
 /// `hud::rgba` packs them: alpha in the top byte, then blue, green, red.
@@ -273,21 +336,6 @@ pub fn color_name(color: Option<u32>) -> &'static str {
 
 /// The mouse buttons a custom button can send, by the names [`keybinds::mouse_button`] reads.
 pub const MOUSE_KEYS: [&str; 2] = ["key.mouse.left", "key.mouse.right"];
-
-/// The controls the Touch Controls page lists, in layout order. The pause and hide-HUD buttons are not
-/// listed: the pause button is a phone's way back, and the hide-HUD button is how the HUD comes back.
-pub const CONTROLS: [Control; 10] = [
-    Control::Forward,
-    Control::Back,
-    Control::Left,
-    Control::Right,
-    Control::Sneak,
-    Control::Jump,
-    Control::Perspective,
-    Control::Chat,
-    Control::Pause,
-    Control::Inventory,
-];
 
 /// The control's name in `horizon-touch.txt`; the hotbar stays where the HUD puts it.
 pub fn control_name(control: Control) -> Option<&'static str> {
@@ -349,14 +397,17 @@ pub fn control_caption(control: Control) -> &'static str {
 /// The touch overlay as the player arranged it (`horizon-touch.txt`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TouchSettings {
-    /// How opaque the button backgrounds are; 1 draws them as Horizon always did.
+    /// The overlay-wide opacity older builds had. Each button keeps its own now: a file's value is
+    /// handed to every button on load (`migrate_global_style`) and this returns to 1.
     pub opacity: f32,
-    /// How large the buttons are, `MIN_SCALE`..=`MAX_SCALE`.
+    /// The overlay-wide size older builds had, carried into every button the same way.
     pub scale: f32,
     /// Buttons the player moved, by name: where their top-left corner sits.
     pub placements: BTreeMap<Control, Placement>,
     /// Buttons the player turned off. The pause button is never hidden: a phone needs a way back.
     pub hidden: BTreeSet<Control>,
+    /// Each built-in button's own width, height and opacity.
+    pub styles: BTreeMap<Control, ButtonStyle>,
     /// The player's own buttons, by id.
     pub buttons: BTreeMap<u16, CustomButton>,
     /// The D-pad, or the analog stick in its place.
@@ -374,6 +425,7 @@ impl Default for TouchSettings {
             scale: 1.0,
             placements: BTreeMap::new(),
             hidden: BTreeSet::new(),
+            styles: BTreeMap::new(),
             buttons: BTreeMap::new(),
             movement: Movement::DPad,
             stick_scale: 1.0,
@@ -431,16 +483,25 @@ fn parse_button(value: &str) -> Option<(u16, CustomButton)> {
         y: clamp_unit(y.trim(), default.y, 0.0, 1.0),
     };
     if parts.len() == 5 {
-        // `<scale>:<opacity>:<key>`, a square button.
+        // `<scale>:<opacity>:<key>`, a square button. The button showed its key's label, so that
+        // becomes its name rather than every older button turning into "NEW".
         let scale = clamp_unit(parts[2], 1.0, MIN_SCALE, MAX_SCALE);
+        let key = parse_key(parts[4]);
         return Some((
             id,
             CustomButton {
+                name: key
+                    .as_deref()
+                    .map(key_label)
+                    .unwrap_or_default()
+                    .chars()
+                    .take(MAX_NAME)
+                    .collect(),
                 placement,
                 width: scale,
                 height: scale,
                 opacity: clamp_unit(parts[3], 1.0, MIN_OPACITY, 1.0),
-                keys: [parse_key(parts[4]), None, None, None],
+                keys: [key, None, None, None],
                 ..CustomButton::default()
             },
         ));
@@ -468,7 +529,11 @@ fn parse_button(value: &str) -> Option<(u16, CustomButton)> {
 impl TouchSettings {
     pub fn load(dir: &Path) -> Self {
         match fs::read_to_string(dir.join(FILE)) {
-            Ok(text) => Self::parse(&text),
+            Ok(text) => {
+                let mut s = Self::parse(&text);
+                s.spread_stacked_buttons();
+                s
+            }
             Err(_) => Self::default(),
         }
     }
@@ -523,6 +588,23 @@ impl TouchSettings {
                         s.placements.insert(control, placement);
                     }
                 }
+                // `size:<name>:<width>:<height>:<opacity>`, as `serialize` writes it.
+                "size" => {
+                    if let Some((name, sides)) = value.split_once(':')
+                        && let Some(control) = control_from_name(name.trim())
+                    {
+                        let mut sides = sides.split(':');
+                        let mut next = |default: f32, lo: f32, hi: f32| {
+                            clamp_unit(sides.next().unwrap_or(""), default, lo, hi)
+                        };
+                        let style = ButtonStyle {
+                            width: next(1.0, MIN_SIZE, MAX_SIZE),
+                            height: next(1.0, MIN_SIZE, MAX_SIZE),
+                            opacity: next(1.0, MIN_OPACITY, 1.0),
+                        };
+                        s.set_style(control, style);
+                    }
+                }
                 // `button:<id>:x,y:width:height:opacity:name:toggle:swipe:bg:stroke:k0:k1:k2:k3`, as
                 // `serialize` writes it; an older five-field line
                 // (`button:<id>:x,y:scale:opacity:key`) still reads.
@@ -534,7 +616,39 @@ impl TouchSettings {
                 _ => {}
             }
         }
+        s.migrate_global_style();
         s
+    }
+    /// Older builds had one size and opacity for every button; each button carries its own now. A file
+    /// from then hands those values to every built-in (and to the stick, which keeps its own sliders), so
+    /// the overlay looks the same after the update, then stops linking the buttons together.
+    fn migrate_global_style(&mut self) {
+        let (opacity, scale) = (self.opacity, self.scale);
+        if opacity < 1.0 || scale != 1.0 {
+            for control in [
+                Control::Forward,
+                Control::Back,
+                Control::Left,
+                Control::Right,
+                Control::Sneak,
+                Control::Jump,
+                Control::Perspective,
+                Control::Chat,
+                Control::Pause,
+                Control::HideHud,
+                Control::Inventory,
+            ] {
+                let mut style = self.style(control);
+                style.width *= scale;
+                style.height *= scale;
+                style.opacity *= opacity;
+                self.set_style(control, style);
+            }
+            self.stick_scale = (self.stick_scale * scale).clamp(MIN_SCALE, MAX_SCALE);
+            self.stick_opacity = (self.stick_opacity * opacity).clamp(MIN_OPACITY, 1.0);
+        }
+        self.opacity = 1.0;
+        self.scale = 1.0;
     }
     pub fn serialize(&self) -> String {
         let mut text = format!("opacity:{}\nscale:{}\n", self.opacity, self.scale);
@@ -555,6 +669,16 @@ impl TouchSettings {
         for control in &self.hidden {
             if let Some(name) = control_name(*control) {
                 text.push_str(&format!("hidden:{name}\n"));
+            }
+        }
+        for (control, style) in &self.styles {
+            if let Some(name) = control_name(*control)
+                && *style != ButtonStyle::default()
+            {
+                text.push_str(&format!(
+                    "size:{name}:{}:{}:{}\n",
+                    style.width, style.height, style.opacity
+                ));
             }
         }
         for (id, button) in &self.buttons {
@@ -581,7 +705,14 @@ impl TouchSettings {
     }
     /// Default positions, resized and moved; the hotbar follows the HUD and is never hidden.
     pub fn layout(&self, w: f32, h: f32) -> Vec<(Control, Rect)> {
-        let scale = self.scale.clamp(MIN_SCALE, MAX_SCALE);
+        self.layout_at(w, h, false)
+    }
+    /// The same, with the buttons the player turned off still in place: the editor shows them faintly so
+    /// a long press can turn them back on.
+    pub fn editor_layout(&self, w: f32, h: f32) -> Vec<(Control, Rect)> {
+        self.layout_at(w, h, true)
+    }
+    fn layout_at(&self, w: f32, h: f32, hidden_too: bool) -> Vec<(Control, Rect)> {
         let mut v = layout(w, h);
         if self.movement == Movement::Stick {
             // The stick takes the D-pad's 3×3 box, and sneak moves to the left of jump.
@@ -598,7 +729,9 @@ impl TouchSettings {
                 *sneak = [w - MARGIN - 2.0 * s - 8.0, cy, s, s];
             }
         }
-        v.retain(|(control, _)| self.visible(*control));
+        if !hidden_too {
+            v.retain(|(control, _)| self.visible(*control));
+        }
         for (control, r) in &mut v {
             if matches!(control, Control::Hotbar(_)) {
                 continue;
@@ -608,11 +741,15 @@ impl TouchSettings {
             } else {
                 1.0
             };
-            let (bw, bh) = (r[2] * scale * own, r[3] * scale * own);
+            let style = self.style(*control);
+            let (bw, bh) = (
+                r[2] * own * style.width,
+                r[3] * own * style.height,
+            );
             let (mut x, mut y) = (r[0] + (r[2] - bw) / 2.0, r[1] + (r[3] - bh) / 2.0);
             if let Some(placement) = self.placements.get(control) {
-                x = placement.x * w;
-                y = placement.y * h;
+                x = placement.x * (w - bw).max(0.0);
+                y = placement.y * (h - bh).max(0.0);
             }
             *r = [
                 x.clamp(0.0, (w - bw).max(0.0)),
@@ -625,13 +762,13 @@ impl TouchSettings {
         let base = button_size(h);
         for (id, button) in &self.buttons {
             let side = |v: f32| {
-                (base * scale * v.clamp(MIN_SIZE, MAX_SIZE))
+                (base * v.clamp(MIN_SIZE, MAX_SIZE))
                     .round()
                     .max(1.0)
             };
             let (bw, bh) = (side(button.width), side(button.height));
-            let x = button.placement.x * w;
-            let y = button.placement.y * h;
+            let x = button.placement.x * (w - bw).max(0.0);
+            let y = button.placement.y * (h - bh).max(0.0);
             v.push((
                 Control::Custom(*id),
                 [
@@ -671,7 +808,38 @@ impl TouchSettings {
             self.hidden.remove(&control);
         }
     }
-    /// Where a button's top-left corner goes, as fractions of the screen.
+    /// A built-in button's own size and opacity, or the defaults.
+    pub fn style(&self, control: Control) -> ButtonStyle {
+        self.styles.get(&control).copied().unwrap_or_default()
+    }
+    /// Stores a built-in button's style; a default one is forgotten, so the file stays small.
+    pub fn set_style(&mut self, control: Control, style: ButtonStyle) {
+        if !styled(control) {
+            return;
+        }
+        let style = ButtonStyle {
+            width: style.width.clamp(MIN_SIZE, MAX_SIZE),
+            height: style.height.clamp(MIN_SIZE, MAX_SIZE),
+            opacity: style.opacity.clamp(MIN_OPACITY, 1.0),
+        };
+        if style == ButtonStyle::default() {
+            self.styles.remove(&control);
+        } else {
+            self.styles.insert(control, style);
+        }
+    }
+    pub fn set_style_size(&mut self, control: Control, width: f32, height: f32) {
+        let mut style = self.style(control);
+        style.width = width;
+        style.height = height;
+        self.set_style(control, style);
+    }
+    pub fn set_style_opacity(&mut self, control: Control, opacity: f32) {
+        let mut style = self.style(control);
+        style.opacity = opacity;
+        self.set_style(control, style);
+    }
+    /// Where a button's top-left corner goes, as fractions of the space it can move in.
     pub fn set_placement(&mut self, control: Control, x: f32, y: f32) {
         let placement = Placement {
             x: x.clamp(0.0, 1.0),
@@ -689,7 +857,8 @@ impl TouchSettings {
             }
         }
     }
-    /// A new button at the middle of the screen, showing "NEW" until it is named.
+    /// A new button at the middle of the screen, showing "NEW" until it is named. Each further one steps
+    /// away from the last instead of piling up on it.
     pub fn add_button(&mut self, w: f32, h: f32) -> u16 {
         let id = self
             .buttons
@@ -697,13 +866,17 @@ impl TouchSettings {
             .next_back()
             .copied()
             .map_or(0, |id| id.saturating_add(1));
-        let size = (button_size(h) * self.scale.clamp(MIN_SCALE, MAX_SCALE)).round();
+        let size = button_size(h).round();
+        let free = ((w - size).max(1.0), (h - size).max(1.0));
+        let step = (size * 0.45).max(8.0) * self.buttons.len() as f32;
+        let x = ((w - size) / 2.0 + step).rem_euclid(free.0);
+        let y = ((h - size) / 2.0 + step).rem_euclid(free.1);
         self.buttons.insert(
             id,
             CustomButton {
                 placement: Placement {
-                    x: ((w - size) / 2.0).max(0.0) / w.max(1.0),
-                    y: ((h - size) / 2.0).max(0.0) / h.max(1.0),
+                    x: x / free.0,
+                    y: y / free.1,
                 },
                 ..CustomButton::default()
             },
@@ -796,10 +969,34 @@ impl TouchSettings {
             _ => "NEW".to_owned(),
         }
     }
-    /// The default positions and size; hidden buttons stay hidden and opacity stays as it is.
+    /// The default layout: positions, sizes, opacities, the buttons turned off and the player's own
+    /// buttons all start over. The movement mode and the stick's own size and opacity stay.
     pub fn reset_layout(&mut self) {
+        self.opacity = 1.0;
         self.scale = 1.0;
         self.placements.clear();
+        self.hidden.clear();
+        self.styles.clear();
+        self.buttons.clear();
+    }
+    /// Older builds put every new button on the same spot; a file from then steps the duplicates apart
+    /// instead of showing them piled on one another.
+    fn spread_stacked_buttons(&mut self) {
+        let mut taken: Vec<Placement> = Vec::new();
+        for button in self.buttons.values_mut() {
+            let mut placement = button.placement;
+            while taken.iter().any(|p| {
+                (p.x - placement.x).abs() < 1e-4 && (p.y - placement.y).abs() < 1e-4
+            }) {
+                if placement.x >= 1.0 && placement.y >= 1.0 {
+                    break;
+                }
+                placement.x = (placement.x + 0.05).min(1.0);
+                placement.y = (placement.y + 0.05).min(1.0);
+            }
+            button.placement = placement;
+            taken.push(placement);
+        }
     }
 }
 
@@ -1120,11 +1317,16 @@ mod tests {
     #[test]
     fn touch_settings_survive_a_round_trip() {
         let mut s = TouchSettings::default();
-        s.opacity = 0.5;
-        s.scale = 1.25;
         s.set_placement(Control::Jump, 0.25, 0.6);
         s.set_hidden(Control::Chat, true);
+        s.set_style_size(Control::Jump, 1.2, 0.9);
+        s.set_style_opacity(Control::Jump, 0.4);
         assert_eq!(TouchSettings::parse(&s.serialize()), s);
+        let line = s.serialize();
+        let line = line.lines().find(|l| l.starts_with("size:jump:")).unwrap();
+        assert_eq!(line.split(':').count(), 5);
+        // Defaults write no size lines at all.
+        assert!(!TouchSettings::default().serialize().contains("size:"));
     }
 
     #[test]
@@ -1217,7 +1419,9 @@ mod tests {
         let mut s = TouchSettings::default();
         s.set_placement(Control::Jump, 0.1, 0.2);
         let r = placed(&s.layout(600.0, 300.0), Control::Jump);
-        assert!((r[0] - 60.0).abs() < 0.01 && (r[1] - 60.0).abs() < 0.01);
+        // Fractions of the space the button can move in, so a resize keeps the layout's shape.
+        assert!((r[0] - 0.1 * (600.0 - r[2])).abs() < 0.01);
+        assert!((r[1] - 0.2 * (300.0 - r[3])).abs() < 0.01);
         // Far over the edge: the button is pulled back onto the screen.
         s.set_placement(Control::Jump, 5.0, 5.0);
         let r = placed(&s.layout(600.0, 300.0), Control::Jump);
@@ -1226,17 +1430,30 @@ mod tests {
     }
 
     #[test]
-    fn scale_resizes_buttons_but_not_the_hotbar() {
-        let mut s = TouchSettings::default();
-        s.scale = 1.5;
+    fn an_old_global_size_and_opacity_become_each_buttons_own() {
+        let s = TouchSettings::parse("opacity:0.5\nscale:1.25\n");
+        // The globals are gone; every built-in carries them, and the stick keeps its own sliders.
+        assert_eq!((s.opacity, s.scale), (1.0, 1.0));
+        let style = s.style(Control::Jump);
+        assert!((style.width - 1.25).abs() < 0.001);
+        assert!((style.height - 1.25).abs() < 0.001);
+        assert!((style.opacity - 0.5).abs() < 0.001);
+        assert!((s.stick_scale - 1.25).abs() < 0.001);
+        assert!((s.stick_opacity - 0.5).abs() < 0.001);
         let base = layout(600.0, 300.0);
         let l = s.layout(600.0, 300.0);
         let (b, j) = (placed(&base, Control::Jump), placed(&l, Control::Jump));
-        assert!((j[2] - b[2] * 1.5).abs() < 0.01);
+        assert!((j[2] - b[2] * 1.25).abs() < 0.01);
+        // The hotbar follows the HUD and never takes a style.
         assert_eq!(
             placed(&l, Control::Hotbar(0)),
             placed(&base, Control::Hotbar(0))
         );
+        // Saved back, the file carries per-button sizes, not the old globals.
+        let text = s.serialize();
+        assert!(text.contains("size:jump:"));
+        assert!(text.contains("opacity:1\nscale:1\n"));
+        assert_eq!(TouchSettings::parse(&text), s);
     }
 
     #[test]
@@ -1275,7 +1492,10 @@ mod tests {
         assert_eq!((b.width, b.height), (1.5, 1.5));
         assert_eq!(b.opacity, 0.5);
         assert_eq!(b.keys[0].as_deref(), Some("key.keyboard.g"));
-        assert!(b.name.is_empty() && !b.toggle && !b.swipe);
+        // The old button showed its key's label, so that label becomes its name: updating the app must
+        // not turn every button into "NEW".
+        assert_eq!(b.name, key_label("key.keyboard.g"));
+        assert!(!b.toggle && !b.swipe);
         assert_eq!(b.background, None);
         // Saved back, the button keeps its shape in the current format.
         let again = TouchSettings::parse(&s.serialize());
@@ -1338,15 +1558,114 @@ mod tests {
     }
 
     #[test]
-    fn resetting_the_layout_keeps_custom_buttons() {
+    fn resetting_the_layout_clears_positions_styles_and_custom_buttons() {
         let mut s = TouchSettings::default();
         let id = s.add_button(600.0, 300.0);
         s.set_button_key(id, 0, Some("key.keyboard.f3".into()));
+        s.set_placement(Control::Jump, 0.25, 0.6);
+        s.set_hidden(Control::Chat, true);
+        s.set_style_size(Control::Jump, 1.5, 0.5);
+        s.set_style_opacity(Control::Jump, 0.3);
+        s.opacity = 0.5;
+        s.scale = 1.25;
         s.reset_layout();
+        assert!(s.buttons.is_empty());
+        assert!(s.placements.is_empty());
+        assert!(s.hidden.is_empty());
+        assert!(s.styles.is_empty());
+        assert_eq!((s.opacity, s.scale), (1.0, 1.0));
+        assert_eq!(s, TouchSettings::default());
+    }
+
+    #[test]
+    fn each_built_in_keeps_its_own_size_and_opacity() {
+        let mut s = TouchSettings::default();
+        let base = s.layout(600.0, 300.0);
+        s.set_style_size(Control::Jump, 1.5, 0.5);
+        s.set_style_opacity(Control::Jump, 0.4);
+        let l = s.layout(600.0, 300.0);
+        let (jump, before) = (placed(&l, Control::Jump), placed(&base, Control::Jump));
+        assert!((jump[2] - before[2] * 1.5).abs() < 0.01);
+        assert!((jump[3] - before[3] * 0.5).abs() < 0.01);
+        assert_eq!(s.style(Control::Jump).opacity, 0.4);
+        // Every other button stays exactly where and how it was.
+        for control in [Control::Forward, Control::Chat, Control::Perspective] {
+            assert_eq!(placed(&l, control), placed(&base, control));
+            assert_eq!(s.style(control), ButtonStyle::default());
+        }
+        // Only styled controls take a style; the hotbar and the stick keep their own pages.
+        s.set_style_size(Control::Hotbar(0), 2.0, 2.0);
+        s.set_style_size(Control::Stick, 2.0, 2.0);
+        assert_eq!(s.styles, BTreeMap::from([(Control::Jump, s.style(Control::Jump))]));
+        // A style back at the default is forgotten.
+        s.set_style_size(Control::Jump, 1.0, 1.0);
+        s.set_style_opacity(Control::Jump, 1.0);
+        assert!(s.styles.is_empty());
+    }
+
+    #[test]
+    fn the_editor_shows_buttons_the_player_turned_off() {
+        let mut s = TouchSettings::default();
+        s.set_hidden(Control::Chat, true);
+        assert!(!s.layout(600.0, 300.0).iter().any(|(c, _)| *c == Control::Chat));
+        let editor = s.editor_layout(600.0, 300.0);
+        assert!(editor.iter().any(|(c, _)| *c == Control::Chat));
+        // The hidden button keeps its default place, so it can be turned back on where it was.
         assert_eq!(
-            s.button_mappings(id),
-            [CustomKey::Key(winit::keyboard::KeyCode::F3)]
+            placed(&editor, Control::Chat),
+            placed(&layout(600.0, 300.0), Control::Chat)
         );
+    }
+
+    #[test]
+    fn new_buttons_step_away_from_the_last() {
+        let mut s = TouchSettings::default();
+        let ids: Vec<u16> = (0..3).map(|_| s.add_button(600.0, 300.0)).collect();
+        let spots: Vec<(f32, f32)> = ids
+            .iter()
+            .map(|id| {
+                let p = s.button(*id).unwrap().placement;
+                (p.x, p.y)
+            })
+            .collect();
+        for (i, a) in spots.iter().enumerate() {
+            for b in &spots[i + 1..] {
+                assert!((a.0 - b.0).abs() > 1e-3 || (a.1 - b.1).abs() > 1e-3);
+            }
+        }
+    }
+
+    #[test]
+    fn stacked_buttons_from_an_older_file_are_spread_on_load() {
+        let mut s = TouchSettings::parse(
+            "button:1:0.5,0.5:1:1:1\n\
+             button:2:0.5,0.5:1:1:1\n\
+             button:3:0.5,0.5:1:1:1\n",
+        );
+        let stacked = |s: &TouchSettings| {
+            let p: Vec<Placement> = s.buttons.values().map(|b| b.placement).collect();
+            (p[0] == p[1]) || (p[1] == p[2]) || (p[0] == p[2])
+        };
+        assert!(stacked(&s));
+        s.spread_stacked_buttons();
+        assert!(!stacked(&s));
+    }
+
+    #[test]
+    fn only_some_buttons_may_be_hidden_or_styled() {
+        for control in [Control::Forward, Control::Jump, Control::Chat, Control::Inventory] {
+            assert!(can_hide(control) && styled(control));
+        }
+        // Pause is a phone's way back and the hide-HUD button brings the HUD back: neither can be
+        // turned off, though both can be resized and faded.
+        for control in [Control::Pause, Control::HideHud] {
+            assert!(!can_hide(control) && styled(control));
+        }
+        // The hotbar follows the HUD and the stick has the Touch Controls page for its own size.
+        for control in [Control::Hotbar(0), Control::Stick] {
+            assert!(!can_hide(control) && !styled(control) && !editable(control));
+        }
+        assert!(editable(Control::Forward) && editable(Control::Custom(0)));
     }
 
     #[test]

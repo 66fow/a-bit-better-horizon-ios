@@ -226,6 +226,10 @@ impl Game<'_> {
             horizon_gamecontroller::keyboard_connected(),
             horizon_gamecontroller::mouse_connected(),
         );
+        // A button the player deleted (or Reset Layout removed) lets go of what it held.
+        if let Err(e) = self.touch_release_removed(event_loop) {
+            log::warn!("Horizon: touch: {e}");
+        }
         if !self.touch_shown() {
             return;
         }
@@ -424,6 +428,28 @@ impl Game<'_> {
             .into_iter()
             .collect();
         for id in ids {
+            self.touch_release_custom(event_loop, id)?;
+        }
+        Ok(())
+    }
+
+    /// Buttons that no longer exist (deleted, or cleared by Reset Layout) let go of their keys, so a
+    /// deletion never leaves a key stuck down.
+    fn touch_release_removed(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let missing = |id: &u16| self.settings.touch.button(*id).is_none();
+        if !self.touch.custom_keys.keys().any(missing) && !self.touch.toggled.iter().any(missing) {
+            return Ok(());
+        }
+        let ids: Vec<u16> = self
+            .touch
+            .custom_keys
+            .keys()
+            .copied()
+            .chain(self.touch.toggled.iter().copied())
+            .filter(|id| self.settings.touch.button(*id).is_none())
+            .collect();
+        for id in ids {
+            self.touch.toggled.remove(&id);
             self.touch_release_custom(event_loop, id)?;
         }
         Ok(())
@@ -666,7 +692,6 @@ impl Game<'_> {
             return;
         }
         let atlas = &self.gui.atlas;
-        let opacity = self.settings.touch.opacity;
         for (control, r) in self.settings.touch.layout(batch.width, batch.height) {
             if matches!(control, Control::Hotbar(_)) {
                 continue;
@@ -681,7 +706,7 @@ impl Game<'_> {
                     &self.settings.touch.button_label(id),
                     r,
                     self.touch.fingers.held(control) || self.touch.toggled.contains(&id),
-                    opacity * button.opacity,
+                    button.opacity,
                     button.background,
                     button.stroke,
                 );
@@ -694,7 +719,7 @@ impl Game<'_> {
                     r,
                     self.touch.analog.unwrap_or([0.0, 0.0]),
                     self.touch.fingers.held(control),
-                    opacity * self.settings.touch.stick_opacity,
+                    self.settings.touch.stick_opacity,
                 );
                 continue;
             }
@@ -704,7 +729,7 @@ impl Game<'_> {
                 control,
                 r,
                 self.touch.fingers.held(control),
-                opacity,
+                self.settings.touch.style(control).opacity,
             );
         }
     }
