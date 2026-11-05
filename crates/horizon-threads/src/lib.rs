@@ -4,8 +4,10 @@
 /// The game window's boot screen, before wgpu's first frame paints over it.
 #[cfg(target_os = "windows")]
 pub mod boot_paint;
+/*
 pub mod capped;
 pub mod heap_census;
+*/
 pub mod jobs;
 pub mod memory_limit;
 
@@ -303,6 +305,7 @@ pub fn catch_stop_signals() {}
 ///
 /// It sits behind [`capped`]'s hard ceiling: with none set, every request is
 /// passed on unchanged and only the byte counter moves.
+/*
 pub use capped::{ALLOCATOR, Allocator};
 
 /// The global allocator of a build with the `alloc-census` feature: live
@@ -331,6 +334,7 @@ pub fn configure_allocator() {
         libmimalloc_sys::mi_option_set(PURGE_DELAY, 0);
     }
 }
+*/
 
 /// The bytes the allocator has committed now and at its peak (mimalloc's
 /// process info), for `horizon-ctl memory`.
@@ -360,12 +364,14 @@ pub fn allocator_commit() -> (usize, usize) {
         );
     }
     (info[5], info[6])
+    (0, 0)
 }
 
 /// Give back to the OS the memory the allocator holds free, after something
 /// large was dropped: mimalloc's free pages, then the system heap's, which
 /// native libraries still use: glibc keeps freed pages in the arena of the
 /// thread that allocated them, and macOS in its zones until memory runs short.
+/*
 pub fn release_free_memory() {
     // SAFETY: frees only pages no allocation uses (this thread's heap, shared arenas).
     unsafe {
@@ -373,6 +379,7 @@ pub fn release_free_memory() {
     }
     release();
 }
+*/
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn release() {
@@ -622,6 +629,7 @@ mod tests {
 
     /// The option set is the purge delay: mimalloc v3's default for it is
     /// 1000 ms, and it is 0 once configured.
+/*
     #[test]
     fn configuring_the_allocator_purges_at_once() {
         // SAFETY: reads and sets one integer option.
@@ -633,6 +641,7 @@ mod tests {
         assert_eq!(get(), 0);
     }
 }
+*/
 
 #[cfg(all(test, windows))]
 mod junction_tests {
@@ -719,6 +728,7 @@ pub fn memory_use() -> MemoryUse {
     use_
 }
 
+/*
 fn sample_memory() -> MemoryUse {
     let (mut rss, mut peak_rss) = (0, 0);
     // SAFETY: every argument but the two out-parameters is a null pointer,
@@ -742,6 +752,7 @@ fn sample_memory() -> MemoryUse {
         available: available_memory(),
     }
 }
+*/
 
 // `mach_task_self_` (`mach/mach_init.h`), the calling task's own Mach port.
 // libc binds it on macOS only, though every Apple platform's libSystem exports
@@ -820,4 +831,3 @@ fn available_memory() -> Option<usize> {
 fn available_memory() -> Option<usize> {
     None
 }
-
