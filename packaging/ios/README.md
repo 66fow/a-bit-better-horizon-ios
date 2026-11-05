@@ -116,8 +116,9 @@ claim and not an assumption.
 
 The game is landscape-only on a phone, and both halves are needed:
 
-- `UISupportedInterfaceOrientations` in `Info.plist` and `GameInfo.plist` lists the two landscape directions and
-  no portrait. This is what the launch screen and the bundle's own metadata are judged by.
+- `UISupportedInterfaceOrientations` in `Info.plist` lists the two landscape directions and no portrait, and
+  `GameInfo.plist` adds portrait for the launcher, which turns with the device while it covers the game. This is
+  what the launch screen and the bundle's own metadata are judged by.
 - `ValidOrientations::Landscape` on the winit window attributes (`crates/horizon-client/src/game.rs`, both
   `resumed` implementations). Without it the plist alone does not hold: winit implements
   `supportedInterfaceOrientations` on its own view controller from its default

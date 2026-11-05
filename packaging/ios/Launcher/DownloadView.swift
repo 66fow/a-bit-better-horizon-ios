@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 /// The C entry point `horizon-ios-launcher` looks up when a phone with no game files starts downloading them
-/// (crates/horizon-client/src/game/import_screen.rs): an upright SwiftUI screen over the game with the download's
+/// (crates/horizon-client/src/game/import_screen.rs): a SwiftUI screen over the game with the download's
 /// progress, speed and time left, read from the game with `download-state`. It goes away by itself once the game
 /// files are in and the game loads. Shown even while the launcher is switched off: it only needs this framework.
 @_cdecl("horizon_download_present")
@@ -41,15 +41,11 @@ private func presentDownload(attempts: Int) {
     host.modalTransitionStyle = .crossDissolve
     // A locked phone drops the connection: keep the screen on while the files come in.
     UIApplication.shared.isIdleTimerDisabled = true
-    root.present(host, animated: false) {
-        turn(host.view.window?.windowScene, to: .portrait)
-    }
+    root.present(host, animated: false)
 }
 
-/// The download screen stands upright, whatever the game under it does.
+/// The download screen turns with the device, whatever the game under it does.
 private final class DownloadHostingController: UIHostingController<AnyView> {
-    override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .portrait }
-    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .portrait }
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
 }
 

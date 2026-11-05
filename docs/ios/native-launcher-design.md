@@ -6,7 +6,7 @@ Use semantic UIKit colors and system type so light/dark appearance and Dynamic T
 
 Scenery comes from the player's imported title panorama or their world's thumbnail. Neither game assets nor screenshots are bundled with the launcher. Before imports are available, a simple original landscape fallback keeps the layout usable. Avoid restoring the old promotional splash animation, duplicated account panels or device-status chips on Play.
 
-Opening the app itself is the exception: `packaging/ios/Launcher/IntroView.swift` plays `Unity.mp4` once per launch, full screen and silent, before the launcher's home. It holds portrait while it plays, a tap anywhere skips it, and the launcher rotates freely once it ends; Quit Game brings the launcher back without the clip.
+The launcher opens straight to its home: there is no intro clip or splash, and the launcher turns with the device in any orientation. The game under it stays landscape-only, which the phone returns to when Play dismisses the launcher.
 
 The launcher branch starts from the device-tested build 16 source, before upstream removed the launcher. Native world creation now sends typed JSON through `world-create`, preserving names/seeds with spaces and mapping mode, difficulty, cheats, world type, structures and bonus chest to the existing `WorldOptions`. Hardcore locks Hard difficulty and disables cheats/bonus chest at both UI and engine boundaries. The separate direct-title experiment remains intact. No PR or push is part of this design iteration.
 
