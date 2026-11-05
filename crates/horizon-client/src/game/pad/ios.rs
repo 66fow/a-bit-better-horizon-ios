@@ -11,6 +11,35 @@ pub(super) struct Devices {
     connected: usize,
 }
 
+/// Splitscreen's reader of every player's controller. GameController gives one
+/// active pad and no per-device movement, so the router sees no events; P1's pad
+/// is still read by `Pads::read` as without splitscreen.
+pub(in crate::game) type PadId = usize;
+#[derive(Default)]
+pub(in crate::game) struct PadRouter {}
+impl PadRouter {
+    pub(in crate::game) fn events(&mut self) -> Vec<super::PadEvent> {
+        Vec::new()
+    }
+    pub(in crate::game) fn lend_output(&mut self, _: &mut Pads, _: PadId) {}
+    pub(in crate::game) fn reclaim_output(&mut self, _: &mut Pads) {}
+    pub(in crate::game) fn connected(&self, _: PadId) -> bool {
+        false
+    }
+    pub(in crate::game) fn uuid(&self, _: PadId) -> [u8; 16] {
+        [0; 16]
+    }
+    pub(in crate::game) fn state(&self, _: PadId) -> PadState {
+        PadState::default()
+    }
+    pub(in crate::game) fn name(&self, _: PadId) -> String {
+        String::new()
+    }
+    pub(in crate::game) fn style(&self, _: PadId) -> GlyphStyle {
+        GlyphStyle::Auto
+    }
+}
+
 /// The glyphs to draw, from the product category iOS reports, through the vendor ids gilrs' pads are
 /// matched by.
 fn style(category: &str) -> GlyphStyle {
@@ -25,6 +54,9 @@ fn style(category: &str) -> GlyphStyle {
 }
 
 impl Pads {
+    /// No output half yet: nothing to release.
+    pub(in crate::game) fn release_hardware(&mut self) {}
+
     /// Read the active pad.
     pub(super) fn read(&mut self) -> PadState {
         let controllers = horizon_gamecontroller::controllers();

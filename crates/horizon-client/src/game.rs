@@ -8171,6 +8171,9 @@ impl Game<'_> {
             self.screen = Screen::Paused;
         }
     }
+    /// iOS pauses from the app becoming inactive, not from a window losing focus.
+    #[cfg(target_os = "ios")]
+    fn pause_if_inactive(&mut self) {}
     /// `KeyMapping.setAll`: every key physically held is held again, as the
     /// mapping it is bound to, so a key pressed or kept down behind a screen
     /// counts once the game has the keyboard back. A sneak or sprint that
