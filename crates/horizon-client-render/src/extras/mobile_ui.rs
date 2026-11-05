@@ -33,6 +33,10 @@ pub enum Item {
     AgentControl,
     /// On the Horizon Settings page.
     DiscordPresence,
+    /// On the AI Agent page, next to Agent Control: the F3 recording shortcuts.
+    ReproKeys,
+    /// On the Splitscreen settings page.
+    Splitscreen,
 }
 /// The Extras page: headers and items.
 pub fn rows() -> Vec<Result<Item, &'static str>> {
@@ -116,7 +120,17 @@ impl Item {
             Item::NoAi => "No AI",
             Item::AgentControl => "Agent Control",
             Item::DiscordPresence => "Discord Rich Presence",
+            Item::ReproKeys => "Recording shortcuts",
+            Item::Splitscreen => "Splitscreen",
         }
+    }
+    /// The caption in the current language (English when the key is missing).
+    pub fn caption_text(self) -> String {
+        self.caption().into()
+    }
+    /// The description in the current language (English when the key is missing).
+    pub fn description_text(self) -> String {
+        self.description().into()
     }
     /// The switch this setting belongs to: it does nothing while that is off.
     pub fn parent(self) -> Option<Item> {
@@ -129,7 +143,8 @@ impl Item {
             MouseTweaksWheel => MouseTweaks,
             SortKey => Sort,
             Fullbright | DynamicLights | OwnNameTag | Zoom | Minimap | Fps | Keystrokes
-            | MouseTweaks | Sort | AutoReconnect | NoAi | AgentControl | DiscordPresence => {
+            | MouseTweaks | Sort | AutoReconnect | NoAi | AgentControl | DiscordPresence
+            | ReproKeys | Splitscreen => {
                 return None;
             }
         })
@@ -183,6 +198,12 @@ impl Item {
             Item::AgentControl => {
                 "Your own AI agent can play this game through horizon-ctl or an MCP client, on this computer only."
             }
+            Item::ReproKeys => {
+                "F3+R starts or stops a repro recording and F3+E writes its bundle. Off by default: a recording copies the world."
+            }
+            Item::Splitscreen => {
+                "In a world, another controller can join as a new player: press A when it asks, then pick a profile and where to play."
+            }
         }
     }
     /// The frame-time cost the main switch of an extra shows.
@@ -217,6 +238,8 @@ impl Item {
             Item::NoAi => e.no_ai,
             Item::AgentControl => e.agent_control,
             Item::DiscordPresence => e.discord_presence,
+            Item::ReproKeys => e.repro_keys,
+            Item::Splitscreen => e.splitscreen,
             _ => return None,
         })
     }
@@ -276,6 +299,8 @@ impl Item {
             Item::NoAi => e.no_ai = !e.no_ai,
             Item::AgentControl => e.agent_control = !e.agent_control,
             Item::DiscordPresence => e.discord_presence = !e.discord_presence,
+            Item::ReproKeys => e.repro_keys = !e.repro_keys,
+            Item::Splitscreen => e.splitscreen = !e.splitscreen,
             Item::ZoomKey | Item::SortKey => {}
         }
     }

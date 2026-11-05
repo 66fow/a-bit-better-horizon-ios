@@ -1,10 +1,6 @@
 //! Android's way in: NativeActivity loads `libhorizon_android.so` (crates/horizon-android) and calls
 //! `android_main` on its own thread, where `main` then runs as it does on every other platform.
-use std::sync::OnceLock;
 use winit::platform::android::activity::AndroidApp;
-
-/// The activity, for `game::event_loop`.
-pub(crate) static APP: OnceLock<AndroidApp> = OnceLock::new();
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
@@ -21,6 +17,6 @@ fn android_main(app: AndroidApp) {
         let _ = std::env::set_current_dir(&files);
         unsafe { std::env::set_var("HOME", files) };
     }
-    let _ = APP.set(app);
+    let _ = horizon_client::ANDROID_APP.set(app);
     crate::main();
 }

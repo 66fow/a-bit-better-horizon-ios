@@ -21328,7 +21328,7 @@ fn event_loop() -> Result<EventLoop<()>> {
     #[cfg(target_os = "android")]
     {
         use winit::platform::android::EventLoopBuilderExtAndroid;
-        let app = crate::android::APP.get().ok_or("no Android activity")?;
+        let app = crate::ANDROID_APP.get().ok_or("no Android activity")?;
         Ok(EventLoop::builder().with_android_app(app.clone()).build()?)
     }
     #[cfg(not(target_os = "android"))]

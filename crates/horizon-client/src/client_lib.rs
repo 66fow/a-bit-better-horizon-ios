@@ -2,6 +2,11 @@
 //! bindings between the validated simulation pieces and the game loop.
 #![forbid(unsafe_code)]
 extern crate self as horizon_client;
+/// The activity `android_main` was handed: `game::event_loop` needs it, and the two
+/// live in different crates now (`main.rs` is the Android cdylib's root).
+#[cfg(target_os = "android")]
+pub static ANDROID_APP: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> =
+    std::sync::OnceLock::new();
 pub mod advancements;
 pub mod ambience;
 pub mod animate_tick;
