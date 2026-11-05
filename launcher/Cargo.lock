@@ -2642,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-bench"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-telemetry",
  "serde",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "libm",
 ]
@@ -2670,7 +2670,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-friends"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "chacha20poly1305",
  "getrandom 0.3.4",
@@ -2685,7 +2685,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-launcher"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -2759,7 +2759,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-mods"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-shader-api",
  "log",
@@ -2774,7 +2774,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-port-pack"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-mods",
  "serde",
@@ -2787,7 +2787,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-prepare"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "crc32fast",
  "libc",
@@ -2815,7 +2815,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-release-sign"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "base64",
  "ring",
@@ -2823,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-shader-api"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "bytemuck",
  "naga",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-telemetry"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "getrandom 0.3.4",
  "ruzstd",
@@ -2848,11 +2848,11 @@ dependencies = [
 
 [[package]]
 name = "horizon-theme"
-version = "0.2.6"
+version = "0.2.7"
 
 [[package]]
 name = "horizon-world"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "flate2",
  "horizon-core",

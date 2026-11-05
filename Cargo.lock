@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-horizon-mod"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-mods",
  "serde_json",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-airplay"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "objc2 0.6.5",
  "objc2-core-foundation",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-anticheat"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "serde",
  "toml",
@@ -1296,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-assets"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-core",
  "log",
@@ -1307,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-bench"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-telemetry",
  "serde",
@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-bots"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-protocol",
  "serde_json",
@@ -1333,7 +1333,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-client"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "ab_glyph",
  "bytemuck",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-client-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-world",
  "serde_json",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-client-input"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "arboard",
  "horizon-client-core",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-client-render"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "ab_glyph",
  "base64",
@@ -1531,7 +1531,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-command"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-client-core",
  "horizon-core",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-core"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "libm",
 ]
@@ -1560,14 +1560,14 @@ dependencies = [
 
 [[package]]
 name = "horizon-dnssd"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "horizon-dualsense"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "cpal",
  "hidapi",
@@ -1576,7 +1576,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-friends"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "chacha20poly1305",
  "getrandom 0.3.4",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-gamecontroller"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-hdr"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "ash",
  "wayland-backend",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-ios"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-core",
  "horizon-world",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-ios-launcher"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "libc",
  "log",
@@ -1628,7 +1628,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-items"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-client-core",
  "horizon-core",
@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-mods"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-shader-api",
  "log",
@@ -1703,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-port-pack"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-mods",
  "serde",
@@ -1716,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-prepare"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "crc32fast",
  "libc",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-protocol"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "aes",
  "flate2",
@@ -1745,7 +1745,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-relay"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "getrandom 0.3.4",
  "horizon-friends",
@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-release-sign"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "base64",
  "ring",
@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-server"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "ab_glyph",
  "base64",
@@ -1793,7 +1793,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-server-files"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "base64",
  "horizon-core",
@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-shader-api"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "bytemuck",
  "naga",
@@ -1819,7 +1819,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-shaders"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "half",
  "horizon-core",
@@ -1830,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-telemetry"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "getrandom 0.3.4",
  "ruzstd",
@@ -1841,11 +1841,11 @@ dependencies = [
 
 [[package]]
 name = "horizon-theme"
-version = "0.2.6"
+version = "0.2.7"
 
 [[package]]
 name = "horizon-threads"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "libc",
  "libmimalloc-sys",
@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "horizon-world"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "flate2",
  "horizon-core",
@@ -5323,7 +5323,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "horizon-mod-api-gen",
  "horizon-theme",
