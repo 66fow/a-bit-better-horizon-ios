@@ -19090,6 +19090,22 @@ impl Game<'_> {
             ));
             return;
         }
+        #[cfg(target_os = "ios")]
+        {
+            // UIKit pointer lock is a gameplay request; every overlay/text field releases it.
+            let want = self.focused
+                && self.title.is_none()
+                && self.screen == Screen::Playing
+                && self.player.is_some()
+                && self.sign_edit.is_none()
+                && self.book.is_none()
+                && self.server_packs.prompt.is_none()
+                && !self.dialog_open()
+                && !self.pause;
+            if self.captured != want {
+                self.capture(want);
+            }
+        }
         horizon_client::spans::time("pads", || self.poll_pads(event_loop));
         self.pause_if_inactive();
         if self.options.frames.is_some() && self.started.elapsed() > self.options.timeout {
