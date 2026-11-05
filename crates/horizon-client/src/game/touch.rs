@@ -6,6 +6,7 @@ use super::{Game, Screen, event_loop::EventLoopCtl};
 use horizon_client::{
     Result,
     hud::HudBatch,
+    keymapping::SNEAK,
     touch::{self, Control, Out, Touches},
     touch_draw,
 };
@@ -309,15 +310,18 @@ impl Game<'_> {
             match o {
                 Out::Press(Control::Hotbar(slot)) => self.selected = usize::from(slot),
                 Out::Press(Control::Sneak) => {
-                    // A toggle either way: the crouch option toggles a press, otherwise flip the held key
-                    // (as a controller's stick click does).
-                    if self.settings.toggle_crouch {
-                        self.mapped_key(KeyCode::ShiftLeft, true, false, KeyCode::ShiftLeft)?;
-                        self.mapped_key(KeyCode::ShiftLeft, false, false, KeyCode::ShiftLeft)?;
-                    } else {
-                        let sneaking = self.keys.contains(&KeyCode::ShiftLeft);
-                        self.mapped_key(KeyCode::ShiftLeft, !sneaking, false, KeyCode::ShiftLeft)?;
-                    }
+                    // A tap, not a held Shift: flip sneak the way the pad's toggle-sneak does.
+                    // A latch that no keyboard or pad holds is healed away each frame
+                    // (`heal_hold_latches`), so the held key the keyboard path leaves behind
+                    // would not survive.
+                    let screen_open = !super::gameplay_has_keyboard(
+                        self.screen,
+                        self.title.is_some(),
+                        self.dialog_open(),
+                    );
+                    self.toggles.pad_toggle(SNEAK, screen_open);
+                    self.sync_toggle(SNEAK);
+                    self.key_pressed(KeyCode::ShiftLeft, KeyCode::ShiftLeft)?;
                 }
                 Out::Press(Control::HideHud) => {
                     self.touch.hud_hidden = !self.touch.hud_hidden;
