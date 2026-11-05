@@ -4,12 +4,14 @@
 #[cfg(target_os = "android")]
 mod android;
 
+/*
 #[cfg(not(any(feature = "system-allocator", feature = "alloc-census")))]
 #[global_allocator]
 static ALLOCATOR: horizon_threads::Allocator = horizon_threads::ALLOCATOR;
 #[cfg(all(feature = "alloc-census", not(feature = "system-allocator")))]
 #[global_allocator]
 static ALLOCATOR: horizon_threads::CensusAllocator = horizon_threads::CensusAllocator;
+*/
 
 /// The mod API level this game serves, kept in the program for the launcher
 /// to read without running it (`horizon_mods::api_level::MARK`). `main`
