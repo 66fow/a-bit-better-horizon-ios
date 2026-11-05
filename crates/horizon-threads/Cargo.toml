@@ -6,9 +6,9 @@ license.workspace = true
 rust-version = "1.85"
 description = "Scheduling hints for the game's threads and its allocator, and the other OS calls the crates that forbid unsafe code can't make"
 
-[dependencies]
-mimalloc = { version = "0.1.52", default-features = false }
-libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"] }
+#[dependencies]
+#mimalloc = { version = "0.1.52", default-features = false }
+#libmimalloc-sys = { version = "0.1.49", default-features = false, features = ["extended"] }
 
 [target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))'.dependencies]
 libc = "0.2"
