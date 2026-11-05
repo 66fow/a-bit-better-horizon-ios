@@ -199,7 +199,7 @@ pub fn resident_bytes() -> Option<u64> {
 }
 
 /// The memory this process holds in RAM, in bytes.
-#[cfg(target_vendor = "apple")]
+#[cfg(target_os = "macos")]
 pub fn resident_bytes() -> Option<u64> {
     let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
     // SAFETY: all-zero is a valid value of this plain C struct, and the call writes at most `size`
@@ -215,6 +215,14 @@ pub fn resident_bytes() -> Option<u64> {
         );
         (written == size).then_some(info.pti_resident_size)
     }
+}
+
+/// The memory this process holds, in bytes: on the other Apple systems
+/// `proc_pidinfo` is not available, so this is what the system charges the
+/// process (`phys_footprint`), the number that ends apps there.
+#[cfg(all(target_vendor = "apple", not(target_os = "macos")))]
+pub fn resident_bytes() -> Option<u64> {
+    crate::footprint().map(|bytes| bytes as u64)
 }
 
 /// The memory this process holds in RAM, in bytes: not known on this system.
