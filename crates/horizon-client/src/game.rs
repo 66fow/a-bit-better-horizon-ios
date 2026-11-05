@@ -17368,10 +17368,6 @@ impl ApplicationHandler for Game<'_> {
         self.poll_pads(event_loop);
         #[cfg(not(target_os = "ios"))]
         self.pause_if_inactive();
-        if !self.splitscreen.active {
-            self.sync_system_keyboard();
-            self.touch_frame(event_loop);
-        }
         if self.options.frames.is_some() && self.started.elapsed() > self.options.timeout {
             self.error = Some("frame-limited run timed out".into());
             event_loop.exit();
@@ -19108,6 +19104,13 @@ impl Game<'_> {
         }
         horizon_client::spans::time("pads", || self.poll_pads(event_loop));
         self.pause_if_inactive();
+        if !self.splitscreen.active {
+            self.sync_system_keyboard();
+            // A menu tap's press and release are made up a frame after the touch, and the
+            // close button and held-back clicks are checked here: without this call a tap
+            // only moves the pointer over a button and never clicks it.
+            self.touch_frame(event_loop);
+        }
         if self.options.frames.is_some() && self.started.elapsed() > self.options.timeout {
             self.error = Some("frame-limited run timed out".into());
             event_loop.exit();
