@@ -1361,6 +1361,8 @@ pub enum Page {
     Touch,
     /// The touch overlay's drag-and-drop editor.
     TouchLayout,
+    /// The touch layout profiles: create, switch and delete them.
+    TouchLayouts,
     /// A player's own touch button's options: its id in `touch.buttons`.
     TouchOptions(u16),
     /// A built-in touch button's own size and opacity (nothing else: no name, no keys).
@@ -1433,6 +1435,12 @@ enum Act {
     CopyAgentDetails,
     /// Put the touch overlay's buttons back in their default places.
     TouchReset,
+    /// Touch layouts: switch to one, create the one named in the field, forget one (the press shows
+    /// the confirmation first), keep the one a confirmation asked about.
+    TouchProfileSwitch(String),
+    TouchProfileCreate,
+    TouchProfileDelete(String),
+    TouchProfileKeep,
     /// A player's own touch button: add one, map one of its keys, clear that key (the Options/Delete
     /// popup is handled where it is drawn).
     TouchAdd,
@@ -1499,6 +1507,8 @@ enum WKind {
     },
     /// Where a player's own touch button's name is typed (the box is drawn with the search boxes).
     TouchName,
+    /// Where a new touch layout's name is typed, on the layouts page.
+    TouchProfileName,
 }
 /// Which button a [`WKind::TouchSlider`] restyles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1700,6 +1710,10 @@ pub struct OptionsUi {
     touch_name: ui::EditBox,
     /// The button whose name `touch_name` edits; `None` with no such page open.
     touch_name_id: Option<u16>,
+    /// The layouts page: the name being typed for a new layout.
+    profile_name: ui::EditBox,
+    /// The layout whose Delete was pressed once (the second press forgets it).
+    touch_layout_delete: Option<String>,
     /// The shader pack option whose slider is held, and the handle's own position: it follows
     /// the pointer while the option takes the nearest of its values.
     shader_dragging: Option<(String, f32)>,
@@ -1795,6 +1809,9 @@ impl Default for OptionsUi {
         let mut touch_name = ui::EditBox::new(0.0, 0.0, 310.0, 20.0);
         touch_name.focused = false;
         touch_name.max_length = crate::touch::MAX_NAME;
+        let mut profile_name = ui::EditBox::new(0.0, 0.0, 150.0, 20.0);
+        profile_name.focused = false;
+        profile_name.max_length = crate::touch::MAX_PROFILE_NAME;
         Self {
             stack: vec![Page::Main],
             scroll: 0.0,
@@ -1805,6 +1822,8 @@ impl Default for OptionsUi {
             dragging_style: None,
             touch_name,
             touch_name_id: None,
+            profile_name,
+            touch_layout_delete: None,
             shader_dragging: None,
             pack_dragging: None,
             shift: false,
@@ -2303,6 +2322,7 @@ impl OptionsUi {
                 self.graphics.typing()
             }
             Page::TouchOptions(_) => self.touch_name.focused,
+            Page::TouchLayouts => self.profile_name.focused,
             _ => false,
         }
     }
@@ -2321,6 +2341,13 @@ impl OptionsUi {
                 self.touch_name.y,
                 self.touch_name.width,
                 self.touch_name.height,
+            ]);
+        } else if self.page() == Page::TouchLayouts {
+            return self.profile_name.focused.then_some([
+                self.profile_name.x,
+                self.profile_name.y,
+                self.profile_name.width,
+                self.profile_name.height,
             ]);
         } else {
             return None;
@@ -2445,6 +2472,8 @@ impl OptionsUi {
         self.dragging_style = None;
         self.touch_name.focused = false;
         self.touch_name_id = None;
+        self.profile_name.focused = false;
+        self.touch_layout_delete = None;
     }
     fn push(&mut self, page: Page) {
         self.stack.push(page);
@@ -2456,6 +2485,11 @@ impl OptionsUi {
         self.dragging_style = None;
         self.touch_name.focused = false;
         self.touch_name_id = None;
+        self.profile_name.focused = false;
+        self.touch_layout_delete = None;
+        if page == Page::TouchLayouts {
+            self.profile_name.set_value("");
+        }
         self.focus = None;
         self.focus_from_keyboard = false;
         self.can_change_value = false;
@@ -2559,6 +2593,7 @@ impl OptionsUi {
             Page::Controller => "horizon.pages.controller",
             Page::PadBinds => "horizon.pages.controller_binds",
             Page::Touch | Page::TouchLayout => "Touch Controls",
+            Page::TouchLayouts => "Touch Layouts",
             Page::TouchOptions(_) | Page::TouchStyle(_) => "Button Options",
             Page::TouchKey(..) => "Choose Key",
             Page::Extras => "horizon.pages.extras",
@@ -3027,6 +3062,7 @@ impl OptionsUi {
             Page::Touch => {
                 let stick = s.touch.movement == crate::touch::Movement::Stick;
                 let mut rows = vec![
+                    Row::Note(format!("Layout: {}", s.touch.profile)),
                     Row::Note("Drag the buttons into place, then tap Done.".to_owned()),
                     Row::Buttons(
                         button(
@@ -3044,6 +3080,16 @@ impl OptionsUi {
                             Act::TouchReset,
                         )),
                     ),
+                    Row::Buttons(
+                        button(
+                            0.0,
+                            0.0,
+                            310.0,
+                            Text::literal("Layouts..."),
+                            Act::Push(Page::TouchLayouts),
+                        ),
+                        None,
+                    ),
                     Row::Big(Opt::TouchStick),
                 ];
                 // The stick is the one button still sized here; every other button has its own options
@@ -3056,6 +3102,93 @@ impl OptionsUi {
                     "In Edit Layout, hold any button to resize it, fade it, or turn it off."
                         .to_owned(),
                 ));
+                rows
+            }
+            Page::TouchLayouts => {
+                let typed = self.profile_name.value.trim();
+                let taken = typed.eq_ignore_ascii_case(&s.touch.profile)
+                    || typed.eq_ignore_ascii_case(crate::touch::DEFAULT_PROFILE)
+                    || s.touch_profiles
+                        .layouts
+                        .keys()
+                        .any(|used| used.eq_ignore_ascii_case(typed));
+                let usable = crate::touch::valid_profile_name(typed) && !taken;
+                let create = button(
+                    0.0,
+                    0.0,
+                    150.0,
+                    Text::literal("Create"),
+                    Act::TouchProfileCreate,
+                );
+                let mut rows = vec![
+                    Row::Note(format!("In use: {}", s.touch.profile)),
+                    Row::Note("A new layout starts from the default D-pad.".to_owned()),
+                    Row::Buttons(
+                        Widget {
+                            x: 0.0,
+                            y: 0.0,
+                            w: 150.0,
+                            h: 20.0,
+                            kind: WKind::TouchProfileName,
+                            list: false,
+                            row: 0,
+                        },
+                        Some(if usable { create } else { inactive(create) }),
+                    ),
+                    Row::Note(if !crate::touch::valid_profile_name(typed) {
+                        "Name: 1 to 16 letters, digits, spaces, _ or -.".to_owned()
+                    } else if taken {
+                        "That name is already used.".to_owned()
+                    } else {
+                        "Tap Create to start a layout by that name.".to_owned()
+                    }),
+                ];
+                for layout in s.touch_layout_names() {
+                    let active = layout == s.touch.profile;
+                    if self.touch_layout_delete.as_deref() == Some(layout.as_str()) {
+                        // The Delete press before the one that forgets it.
+                        rows.push(Row::Buttons(
+                            button(
+                                0.0,
+                                0.0,
+                                150.0,
+                                Text::literal("Cancel"),
+                                Act::TouchProfileKeep,
+                            ),
+                            Some(button(
+                                0.0,
+                                0.0,
+                                150.0,
+                                Text::literal("Delete").with_color(0xFF5555),
+                                Act::TouchProfileDelete(layout.clone()),
+                            )),
+                        ));
+                        continue;
+                    }
+                    let pick = button(
+                        0.0,
+                        0.0,
+                        150.0,
+                        Text::literal(if active {
+                            format!("{layout} (in use)")
+                        } else {
+                            layout.clone()
+                        }),
+                        Act::TouchProfileSwitch(layout.clone()),
+                    );
+                    let remove =
+                        (!active && !layout.eq_ignore_ascii_case(crate::touch::DEFAULT_PROFILE))
+                            .then(|| {
+                                button(
+                                    0.0,
+                                    0.0,
+                                    150.0,
+                                    Text::literal("Delete"),
+                                    Act::TouchProfileDelete(layout.clone()),
+                                )
+                            });
+                    rows.push(Row::Buttons(if active { inactive(pick) } else { pick }, remove));
+                }
                 rows
             }
             Page::TouchOptions(id) => {
@@ -3826,6 +3959,13 @@ impl OptionsUi {
                     Act::TouchReset,
                 ));
                 out.push(button(68.0, 4.0, 60.0, Text::literal("Add"), Act::TouchAdd));
+                out.push(button(
+                    132.0,
+                    4.0,
+                    60.0,
+                    Text::literal("Layouts"),
+                    Act::Push(Page::TouchLayouts),
+                ));
                 out.push(button(w - 64.0, 4.0, 60.0, tr("gui.done"), Act::Done));
                 for (control, r) in s.touch.editor_layout(w, h) {
                     if matches!(control, crate::touch::Control::Hotbar(_)) {
@@ -4058,6 +4198,13 @@ impl OptionsUi {
         if let Some(wd) = out.iter().find(|w| matches!(&w.kind, WKind::TouchName)) {
             self.touch_name.x = wd.x;
             self.touch_name.y = wd.y;
+        }
+        if let Some(wd) = out
+            .iter()
+            .find(|w| matches!(&w.kind, WKind::TouchProfileName))
+        {
+            self.profile_name.x = wd.x;
+            self.profile_name.y = wd.y;
         }
         self.row_bands = rows
             .bands
@@ -4555,7 +4702,7 @@ impl OptionsUi {
                         dragging,
                     );
                 }
-                WKind::TouchName => {}
+                WKind::TouchName | WKind::TouchProfileName => {}
             }
             if wd.list && (wd.y < top || wd.y + wd.h > bottom) {
                 batch.clip_since(start, 0.0, top, w, bottom);
@@ -4656,6 +4803,26 @@ impl OptionsUi {
                 );
             }
             self.touch_name = name;
+        }
+        if self.page() == Page::TouchLayouts
+            && self.profile_name.y >= top
+            && self.profile_name.y + self.profile_name.height <= bottom
+        {
+            let mut name = self.profile_name.clone();
+            name.draw(batch, atlas, None);
+            if name.value.is_empty() && !name.focused {
+                batch.text_styled(
+                    atlas,
+                    &Text::literal("New layout name")
+                        .with_color(text::GRAY)
+                        .italic(),
+                    name.text_x(),
+                    name.text_y(),
+                    u32::MAX,
+                    true,
+                );
+            }
+            self.profile_name = name;
         }
         if let Some(lines) = tooltip {
             match tooltip_rect {
@@ -4808,6 +4975,27 @@ impl OptionsUi {
                     events.push(Event::Changed);
                 }
             }
+        }
+        if !drag && self.page() == Page::TouchLayouts {
+            // The new layout's name: a press focuses the field, anywhere else lets it go.
+            let name = &mut self.profile_name;
+            if y >= top
+                && y < bottom
+                && ui::hovered((x, y), name.x, name.y, name.width, name.height)
+            {
+                if !name.focused {
+                    name.focused = true;
+                    name.reset_blink();
+                    name.move_cursor_to_end(false);
+                    name.highlight = 0;
+                    events.push(Event::ButtonClick);
+                    return events;
+                }
+                name.click(atlas, x, false, false);
+                events.push(Event::ButtonClick);
+                return events;
+            }
+            name.focused = false;
         }
         if !drag && self.page() == Page::Language {
             // LanguageScreen's search box: a press inside it focuses it (the caret shows and a phone's
@@ -5179,6 +5367,32 @@ impl OptionsUi {
                             s.touch.reset_layout();
                             events.push(Event::Changed);
                         }
+                        Act::TouchProfileSwitch(name) => {
+                            if s.switch_touch_layout(&name) {
+                                events.push(Event::Changed);
+                            }
+                        }
+                        Act::TouchProfileCreate => {
+                            if s.create_touch_layout(&self.profile_name.value).is_some() {
+                                self.profile_name.set_value("");
+                                self.profile_name.focused = false;
+                                events.push(Event::Changed);
+                                // Straight to the new, empty layout, ready to arrange.
+                                self.push(Page::TouchLayout);
+                            }
+                        }
+                        Act::TouchProfileDelete(name) => {
+                            if self.touch_layout_delete.as_deref() == Some(name.as_str()) {
+                                self.touch_layout_delete = None;
+                                if s.delete_touch_layout(&name) {
+                                    events.push(Event::Changed);
+                                }
+                            } else {
+                                // The first press only arms: the row becomes Cancel / Delete.
+                                self.touch_layout_delete = Some(name);
+                            }
+                        }
+                        Act::TouchProfileKeep => self.touch_layout_delete = None,
                         Act::TouchAdd => {
                             s.touch.add_button(size.0, size.1);
                             events.push(Event::Changed);
@@ -5608,6 +5822,8 @@ impl OptionsUi {
         self.focus_from_keyboard = false;
         self.settings_search.focused = false;
         self.language_search.focused = false;
+        self.profile_name.focused = false;
+        self.touch_layout_delete = None;
         self.can_change_value = false;
         match page {
             Page::ShaderOptions => {
@@ -5681,6 +5897,8 @@ impl OptionsUi {
             self.scroll = 0.0;
         } else if matches!(self.page(), Page::TouchOptions(_)) && self.touch_name.focused {
             self.touch_name.insert_text(text);
+        } else if self.page() == Page::TouchLayouts && self.profile_name.focused {
+            self.profile_name.insert_text(text);
         }
     }
     /// Ctrl+A/C/V/X in the language or pack search box; false when neither
@@ -5720,6 +5938,10 @@ impl OptionsUi {
         }
         if matches!(self.page(), Page::TouchOptions(_)) && self.touch_name.focused {
             self.touch_name.shortcut(shortcut, clipboard);
+            return true;
+        }
+        if self.page() == Page::TouchLayouts && self.profile_name.focused {
+            self.profile_name.shortcut(shortcut, clipboard);
             return true;
         }
         false
@@ -5837,6 +6059,26 @@ impl OptionsUi {
                 let typed: String = t.chars().filter(|c| !c.is_control()).collect();
                 if !typed.is_empty() {
                     self.touch_name.insert_text(&typed);
+                }
+            }
+            return Vec::new();
+        }
+        if self.page() == Page::TouchLayouts && self.profile_name.focused {
+            if matches!(key, K::Escape | K::Enter | K::NumpadEnter) {
+                self.profile_name.focused = false;
+                if key != K::Escape && s.create_touch_layout(&self.profile_name.value).is_some() {
+                    self.profile_name.set_value("");
+                    self.push(Page::TouchLayout);
+                    return vec![Event::Changed];
+                }
+                return Vec::new();
+            }
+            if !self.profile_name.key(key, false, false)
+                && let Some(t) = text
+            {
+                let typed: String = t.chars().filter(|c| !c.is_control()).collect();
+                if !typed.is_empty() {
+                    self.profile_name.insert_text(&typed);
                 }
             }
             return Vec::new();
@@ -6229,6 +6471,32 @@ impl OptionsUi {
                             s.touch.reset_layout();
                             events.push(Event::Changed);
                         }
+                        Act::TouchProfileSwitch(name) => {
+                            if s.switch_touch_layout(&name) {
+                                events.push(Event::Changed);
+                            }
+                        }
+                        Act::TouchProfileCreate => {
+                            if s.create_touch_layout(&self.profile_name.value).is_some() {
+                                self.profile_name.set_value("");
+                                self.profile_name.focused = false;
+                                events.push(Event::Changed);
+                                // Straight to the new, empty layout, ready to arrange.
+                                self.push(Page::TouchLayout);
+                            }
+                        }
+                        Act::TouchProfileDelete(name) => {
+                            if self.touch_layout_delete.as_deref() == Some(name.as_str()) {
+                                self.touch_layout_delete = None;
+                                if s.delete_touch_layout(&name) {
+                                    events.push(Event::Changed);
+                                }
+                            } else {
+                                // The first press only arms: the row becomes Cancel / Delete.
+                                self.touch_layout_delete = Some(name);
+                            }
+                        }
+                        Act::TouchProfileKeep => self.touch_layout_delete = None,
                         Act::TouchAdd => {
                             s.touch.add_button(self.size.0, self.size.1);
                             events.push(Event::Changed);
@@ -7374,6 +7642,90 @@ mod tests {
         ui.click(&mut s, &atlas, 20.0, 20.0, size, [480, 480], true, false);
         assert_eq!(ui.release(), vec![Event::Changed]);
         assert!(s.touch.placements.contains_key(&Control::Stick));
+    }
+
+    #[test]
+    fn a_layout_is_created_from_the_default_switched_and_deleted() {
+        use crate::touch::Control;
+        let atlas = atlas();
+        let mut s = Settings::default();
+        // Mark the original layout so switching away is visible.
+        s.touch.set_placement(Control::Jump, 0.25, 0.6);
+        let mut ui = OptionsUi::default();
+        let size = (480.0, 720.0);
+        ui.show(Page::TouchLayouts);
+        let find = |ui: &mut OptionsUi, s: &Settings, want: &Act| {
+            let (widgets, ..) = ui.layout(s, size.0, size.1);
+            let w = widgets
+                .into_iter()
+                .find(|w| matches!(&w.kind, WKind::Button { act, .. } if act == want))
+                .unwrap_or_else(|| panic!("no {want:?} button"));
+            (w.x + w.w / 2.0, w.y + w.h / 2.0)
+        };
+        let create_active = |ui: &mut OptionsUi, s: &Settings| {
+            let (widgets, ..) = ui.layout(s, size.0, size.1);
+            widgets
+                .into_iter()
+                .find_map(|w| match w.kind {
+                    WKind::Button {
+                        act: Act::TouchProfileCreate,
+                        active,
+                        ..
+                    } => Some(active),
+                    _ => None,
+                })
+                .expect("the page offers Create")
+        };
+        // Create stays disabled until a valid, unused name is typed.
+        assert!(!create_active(&mut ui, &s));
+        ui.profile_name.set_value("Default");
+        assert!(!create_active(&mut ui, &s));
+        ui.profile_name.set_value("pvp");
+        assert!(create_active(&mut ui, &s));
+        let (x, y) = find(&mut ui, &s, &Act::TouchProfileCreate);
+        assert_eq!(
+            ui.click(&mut s, &atlas, x, y, size, [960, 720], false, false),
+            vec![Event::ButtonClick, Event::Changed]
+        );
+        // The new layout is the default D-pad one, and its editor opens.
+        assert_eq!(s.touch.profile, "pvp");
+        assert!(s.touch.placements.is_empty());
+        assert_eq!(ui.page(), Page::TouchLayout);
+        let stashed = &s.touch_profiles.layouts["Default"];
+        assert_eq!(stashed.placements[&Control::Jump].x, 0.25);
+
+        // Back on the list, Default switches back and restores what it held.
+        ui.show(Page::TouchLayouts);
+        assert_eq!(s.touch.profile, "pvp");
+        let (x, y) = find(&mut ui, &s, &Act::TouchProfileSwitch("Default".into()));
+        assert_eq!(
+            ui.click(&mut s, &atlas, x, y, size, [960, 720], false, false),
+            vec![Event::ButtonClick, Event::Changed]
+        );
+        assert_eq!(s.touch.profile, "Default");
+        assert_eq!(s.touch.placements[&Control::Jump].x, 0.25);
+        assert_eq!(s.touch_profiles.layouts["pvp"].placements.len(), 0);
+
+        // Deleting takes two taps: the first arms, the second removes.
+        let (x, y) = find(&mut ui, &s, &Act::TouchProfileDelete("pvp".into()));
+        assert_eq!(
+            ui.click(&mut s, &atlas, x, y, size, [960, 720], false, false),
+            vec![Event::ButtonClick]
+        );
+        assert!(s.touch_profiles.layouts.contains_key("pvp"));
+        let (x, y) = find(&mut ui, &s, &Act::TouchProfileDelete("pvp".into()));
+        assert_eq!(
+            ui.click(&mut s, &atlas, x, y, size, [960, 720], false, false),
+            vec![Event::ButtonClick, Event::Changed]
+        );
+        assert!(!s.touch_profiles.layouts.contains_key("pvp"));
+        // The active layout has no Delete button at all.
+        assert!(
+            ui.layout(&s, size.0, size.1)
+                .0
+                .iter()
+                .all(|w| !matches!(&w.kind, WKind::Button { act: Act::TouchProfileDelete(n), .. } if n == "Default"))
+        );
     }
 
     fn atlas() -> HudAtlas {

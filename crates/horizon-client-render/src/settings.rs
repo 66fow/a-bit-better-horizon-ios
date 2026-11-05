@@ -195,8 +195,10 @@ pub struct Settings {
     pub video_modes: Vec<crate::window::VideoMode>,
     /// Controller settings (`horizon-controller.txt`, Horizon's own).
     pub controller: crate::gamepad::PadSettings,
-    /// Touch overlay settings (`horizon-touch.txt`, Horizon's own).
+    /// Touch overlay settings (`horizon-touch.txt`, Horizon's own): the active layout.
     pub touch: crate::touch::TouchSettings,
+    /// The other touch layouts (`touch-layouts/`, Horizon's own).
+    pub touch_profiles: crate::touch::TouchProfiles,
     /// Horizon's optional extras (`horizon-extras.txt`), all off by default.
     pub extras: crate::extras::Extras,
     /// The Horizon mods turned on (`horizon-mods.txt`), all off by default.
@@ -287,6 +289,7 @@ impl Default for Settings {
             video_modes: Vec::new(),
             controller: Default::default(),
             touch: Default::default(),
+            touch_profiles: Default::default(),
             extras: Default::default(),
             mods: Default::default(),
             shader_packs: Vec::new(),
@@ -354,6 +357,10 @@ impl Settings {
             .parent()
             .map(crate::touch::TouchSettings::load)
             .unwrap_or_default();
+        let touch_profiles = path
+            .parent()
+            .map(|dir| crate::touch::TouchProfiles::load(dir, &touch.profile))
+            .unwrap_or_default();
         let settings = match fs::read(path) {
             Ok(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
@@ -364,6 +371,7 @@ impl Settings {
                     extras,
                     mods,
                     touch,
+                    touch_profiles,
                     ..Self::parse(&text)
                 }
             }
@@ -373,6 +381,7 @@ impl Settings {
                 extras,
                 mods,
                 touch,
+                touch_profiles,
                 ..Self::default()
             },
         };
@@ -484,6 +493,7 @@ impl Settings {
             video_modes: Vec::new(),
             controller: Default::default(),
             touch: Default::default(),
+            touch_profiles: Default::default(),
             extras: Default::default(),
             mods: Default::default(),
             shader_packs: Vec::new(),
@@ -650,6 +660,7 @@ impl Settings {
             horizon: self.horizon.clone(),
             controller: self.controller.clone(),
             touch: self.touch.clone(),
+            touch_profiles: self.touch_profiles.clone(),
             extras: self.extras.clone(),
             mods: self.mods.clone(),
             video_modes: self.video_modes.clone(),
@@ -675,9 +686,86 @@ impl Settings {
             self.horizon.save(dir);
             self.controller.save(dir);
             self.touch.save(dir);
+            self.touch_profiles.save(dir, &self.touch);
             self.extras.save(dir);
             self.mods.save(&crate::logging::shared_dir(dir));
         }
+    }
+    /// The touch layouts a player can switch to: "Default", then the other names in order.
+    pub fn touch_layout_names(&self) -> Vec<String> {
+        let mut rest: Vec<String> = self
+            .touch_profiles
+            .layouts
+            .keys()
+            .filter(|name| !name.eq_ignore_ascii_case(crate::touch::DEFAULT_PROFILE))
+            .cloned()
+            .collect();
+        if !rest.contains(&self.touch.profile)
+            && !self
+                .touch
+                .profile
+                .eq_ignore_ascii_case(crate::touch::DEFAULT_PROFILE)
+        {
+            rest.push(self.touch.profile.clone());
+        }
+        rest.sort_by_key(|name| name.to_ascii_lowercase());
+        let mut names = vec![crate::touch::DEFAULT_PROFILE.to_owned()];
+        names.append(&mut rest);
+        names
+    }
+    fn touch_layout_taken(&self, name: &str) -> bool {
+        // "Default" is the one every player has: a second one by that name would be a puzzle.
+        name.eq_ignore_ascii_case(crate::touch::DEFAULT_PROFILE)
+            || name.eq_ignore_ascii_case(&self.touch.profile)
+            || self
+                .touch_profiles
+                .layouts
+                .keys()
+                .any(|used| used.eq_ignore_ascii_case(name))
+    }
+    /// A new touch layout, switched to: the default D-pad arrangement, not a copy of the current
+    /// one, with the one in use kept. `None` when the name is empty, unusable or taken.
+    pub fn create_touch_layout(&mut self, raw: &str) -> Option<String> {
+        let name = raw.trim();
+        if !crate::touch::valid_profile_name(name) || self.touch_layout_taken(name) {
+            return None;
+        }
+        let mut layout = crate::touch::TouchSettings::default();
+        layout.profile = name.to_owned();
+        let previous = std::mem::replace(&mut self.touch, layout);
+        self.touch_profiles
+            .layouts
+            .insert(previous.profile.clone(), previous);
+        Some(name.to_owned())
+    }
+    /// Switch to a kept layout, keeping the one in use; `false` when it is the active one already
+    /// or unknown.
+    pub fn switch_touch_layout(&mut self, name: &str) -> bool {
+        if name.eq_ignore_ascii_case(&self.touch.profile) {
+            return false;
+        }
+        let Some(mut next) = self.touch_profiles.layouts.remove(name).or_else(|| {
+            // A player who moved the active layout's file away still gets the stock one back.
+            name.eq_ignore_ascii_case(crate::touch::DEFAULT_PROFILE)
+                .then(crate::touch::TouchSettings::default)
+        }) else {
+            return false;
+        };
+        next.profile = name.to_owned();
+        let previous = std::mem::replace(&mut self.touch, next);
+        self.touch_profiles
+            .layouts
+            .insert(previous.profile.clone(), previous);
+        true
+    }
+    /// Forget a kept layout; the one in use and "Default" stay.
+    pub fn delete_touch_layout(&mut self, name: &str) -> bool {
+        if name.eq_ignore_ascii_case(&self.touch.profile)
+            || name.eq_ignore_ascii_case(crate::touch::DEFAULT_PROFILE)
+        {
+            return false;
+        }
+        self.touch_profiles.layouts.remove(name).is_some()
     }
     /// Volume of a sound source (master excluded).
     pub fn volume(&self, source: &str) -> f32 {
@@ -867,6 +955,43 @@ pub enum Opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn touch_layouts_are_created_from_the_default_and_swapped() {
+        let mut s = Settings::default();
+        s.touch.set_placement(crate::touch::Control::Jump, 0.25, 0.6);
+        let default = s.touch.clone();
+        // A new layout is the default D-pad arrangement, and becomes the active one.
+        assert_eq!(s.create_touch_layout("pvp").as_deref(), Some("pvp"));
+        assert_eq!(s.touch.profile, "pvp");
+        assert_eq!(
+            s.touch.placements.len(),
+            0,
+            "not a copy of the layout in use"
+        );
+        assert_eq!(s.touch_profiles.layouts["Default"], default);
+        // Editing it, then going back, keeps both layouts.
+        s.touch.set_placement(crate::touch::Control::Forward, 0.1, 0.1);
+        assert_eq!(
+            s.touch_layout_names(),
+            [crate::touch::DEFAULT_PROFILE.to_owned(), "pvp".to_owned()]
+        );
+        assert!(s.switch_touch_layout(crate::touch::DEFAULT_PROFILE));
+        assert_eq!(s.touch, default);
+        assert!(s.switch_touch_layout("pvp"));
+        assert!(s.touch.placements.contains_key(&crate::touch::Control::Forward));
+        // Names must be new, whatever their case, and usable as files.
+        assert_eq!(s.create_touch_layout("PVP"), None);
+        assert_eq!(s.create_touch_layout("Default"), None);
+        assert_eq!(s.create_touch_layout("bad/name"), None);
+        assert_eq!(s.create_touch_layout(""), None);
+        // The one in use and Default cannot be forgotten; another kept one can.
+        assert!(!s.delete_touch_layout("pvp"));
+        assert!(!s.delete_touch_layout(crate::touch::DEFAULT_PROFILE));
+        assert!(s.switch_touch_layout(crate::touch::DEFAULT_PROFILE));
+        assert!(s.delete_touch_layout("pvp"));
+        assert!(!s.switch_touch_layout("pvp"));
+        assert_eq!(s.touch_layout_names(), [crate::touch::DEFAULT_PROFILE]);
+    }
     #[test]
     fn the_narrator_reads_its_status_and_the_voice_under_master() {
         let s = Settings::parse("narrator:2\nsoundCategory_master:0.5\nsoundCategory_voice:0.5\n");

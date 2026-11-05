@@ -147,6 +147,21 @@ pub fn hit(layout: &[(Control, Rect)], at: (f32, f32)) -> Option<Control> {
 
 /// Horizon's touch overlay settings (`horizon-touch.txt`).
 pub const FILE: &str = "horizon-touch.txt";
+/// The layouts other than the active one: one file each, by name.
+pub const LAYOUTS_DIR: &str = "touch-layouts";
+/// The layout every player starts with.
+pub const DEFAULT_PROFILE: &str = "Default";
+pub const MAX_PROFILE_NAME: usize = 16;
+
+/// A layout profile's name, which is also its file's stem (so it shows in the Files app): letters,
+/// digits, spaces, `_` and `-`, 1 to [`MAX_PROFILE_NAME`] of them.
+pub fn valid_profile_name(name: &str) -> bool {
+    let name = name.trim();
+    (1..=MAX_PROFILE_NAME).contains(&name.chars().count())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '_' | '-'))
+}
 
 /// A button moved by the player: its top-left corner as fractions of the space it can move in (the
 /// screen minus the button), so a layout survives a rotation, a resize or a change of the button's size.
@@ -398,6 +413,8 @@ pub fn control_caption(control: Control) -> &'static str {
 /// The touch overlay as the player arranged it (`horizon-touch.txt`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TouchSettings {
+    /// The name of the layout profile this is; the active one lives in `horizon-touch.txt`.
+    pub profile: String,
     /// The overlay-wide opacity older builds had. Each button keeps its own now: a file's value is
     /// handed to every button on load (`migrate_global_style`) and this returns to 1.
     pub opacity: f32,
@@ -422,6 +439,7 @@ pub struct TouchSettings {
 impl Default for TouchSettings {
     fn default() -> Self {
         Self {
+            profile: DEFAULT_PROFILE.to_owned(),
             opacity: 1.0,
             scale: 1.0,
             placements: BTreeMap::new(),
@@ -554,6 +572,12 @@ impl TouchSettings {
             };
             let (key, value) = (key.trim(), value.trim());
             match key {
+                "profile" => {
+                    let name = unescape_name(value).trim().to_owned();
+                    if valid_profile_name(&name) {
+                        s.profile = name;
+                    }
+                }
                 "opacity" => s.opacity = clamp_unit(value, s.opacity, MIN_OPACITY, 1.0),
                 "scale" => s.scale = clamp_unit(value, s.scale, MIN_SCALE, MAX_SCALE),
                 "movement" => {
@@ -652,7 +676,12 @@ impl TouchSettings {
         self.scale = 1.0;
     }
     pub fn serialize(&self) -> String {
-        let mut text = format!("opacity:{}\nscale:{}\n", self.opacity, self.scale);
+        let mut text = String::new();
+        // Older builds skip the line: the file stays a plain layout to them.
+        if self.profile != DEFAULT_PROFILE {
+            text.push_str(&format!("profile:{}\n", escape_name(&self.profile)));
+        }
+        text.push_str(&format!("opacity:{}\nscale:{}\n", self.opacity, self.scale));
         if self.movement == Movement::Stick {
             text.push_str("movement:stick\n");
         }
@@ -997,6 +1026,78 @@ impl TouchSettings {
             }
             button.placement = placement;
             taken.push(placement);
+        }
+    }
+}
+
+/// The touch layouts besides the active one: one `touch-layouts/<name>.txt` each. The active layout
+/// is [`TouchSettings`] itself (as `horizon-touch.txt` keeps it), so an older build still starts
+/// with the layout the player last used.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TouchProfiles {
+    /// The inactive layouts, by name.
+    pub layouts: BTreeMap<String, TouchSettings>,
+}
+
+impl TouchProfiles {
+    pub fn load(dir: &Path, active: &str) -> Self {
+        let mut layouts = BTreeMap::new();
+        let Ok(entries) = fs::read_dir(dir.join(LAYOUTS_DIR)) else {
+            return Self::default();
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("txt") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // The active one is `horizon-touch.txt`, whatever a file here is called.
+            if !valid_profile_name(name) || name.eq_ignore_ascii_case(active) {
+                continue;
+            }
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut layout = TouchSettings::parse(&text);
+            layout.spread_stacked_buttons();
+            layout.profile = name.to_owned();
+            layouts.insert(name.to_owned(), layout);
+        }
+        Self { layouts }
+    }
+    /// Writes every layout and drops the files of layouts no longer listed (or of the active one).
+    /// The folder exists only while another layout does.
+    pub fn save(&self, dir: &Path, active: &TouchSettings) {
+        let folder = dir.join(LAYOUTS_DIR);
+        if let Ok(entries) = fs::read_dir(&folder) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("txt") {
+                    continue;
+                }
+                let stale = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_none_or(|name| {
+                        !self.layouts.contains_key(name)
+                            || name.eq_ignore_ascii_case(&active.profile)
+                    });
+                if stale {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+        if self.layouts.is_empty() {
+            let _ = fs::remove_dir(&folder);
+            return;
+        }
+        if fs::create_dir_all(&folder).is_err() {
+            return;
+        }
+        for (name, layout) in &self.layouts {
+            let _ = fs::write(folder.join(format!("{name}.txt")), layout.serialize());
         }
     }
 }
@@ -1409,6 +1510,68 @@ mod tests {
         assert_eq!(line.split(':').count(), 5);
         // Defaults write no size lines at all.
         assert!(!TouchSettings::default().serialize().contains("size:"));
+    }
+
+    #[test]
+    fn a_layout_keeps_its_profile_name() {
+        let mut s = TouchSettings::default();
+        assert_eq!(s.profile, DEFAULT_PROFILE);
+        assert!(!s.serialize().contains("profile:"));
+        s.profile = "pvp".to_owned();
+        assert_eq!(TouchSettings::parse(&s.serialize()), s);
+        assert!(s.serialize().starts_with("profile:pvp\n"));
+        // A file from before profiles, or an unusable name, starts as Default.
+        assert_eq!(TouchSettings::parse("opacity:1\n").profile, DEFAULT_PROFILE);
+        assert_eq!(
+            TouchSettings::parse("profile:bad/name\n").profile,
+            DEFAULT_PROFILE
+        );
+        // Resetting the arrangement keeps the profile.
+        s.set_placement(Control::Jump, 0.5, 0.5);
+        s.reset_layout();
+        assert_eq!(s.profile, "pvp");
+    }
+
+    #[test]
+    fn profile_names_are_file_stems() {
+        assert!(valid_profile_name("pvp"));
+        assert!(valid_profile_name("PvP 1v1"));
+        assert!(valid_profile_name("a"));
+        assert!(!valid_profile_name(""));
+        assert!(!valid_profile_name("   "));
+        assert!(!valid_profile_name("bad/name"));
+        assert!(!valid_profile_name("dots.dots"));
+        assert!(!valid_profile_name(&"x".repeat(MAX_PROFILE_NAME + 1)));
+    }
+
+    #[test]
+    fn layouts_round_trip_through_their_folder() {
+        let dir = std::env::temp_dir().join(format!("horizon-touch-layouts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut active = TouchSettings::default();
+        active.profile = "pvp".to_owned();
+        let mut profiles = TouchProfiles::default();
+        // A layout equal to the default is still a layout: its file is what remembers it.
+        profiles
+            .layouts
+            .insert("Default".to_owned(), TouchSettings::default());
+        let mut building = TouchSettings::default();
+        building.profile = "building".to_owned();
+        building.set_placement(Control::Jump, 0.25, 0.6);
+        profiles.layouts.insert("building".to_owned(), building);
+        profiles.save(&dir, &active);
+        assert_eq!(TouchProfiles::load(&dir, &active.profile), profiles);
+        // The active layout is `horizon-touch.txt`, not one of the folder's files.
+        assert!(!dir.join(LAYOUTS_DIR).join("pvp.txt").exists());
+        // Deleting one drops its file; deleting every one drops the folder.
+        profiles.layouts.remove("building");
+        profiles.save(&dir, &active);
+        assert!(!dir.join(LAYOUTS_DIR).join("building.txt").exists());
+        profiles.layouts.clear();
+        profiles.save(&dir, &active);
+        assert!(!dir.join(LAYOUTS_DIR).exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
