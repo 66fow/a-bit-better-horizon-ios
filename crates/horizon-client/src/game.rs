@@ -7953,8 +7953,18 @@ impl Game<'_> {
     /// drop. Those do not care what sneak and sprint are bound to. A modifier
     /// says nothing about which side is down, so one being up means both
     /// Shifts, or both Controls, are.
+    ///
+    /// A touch button mapped to Shift or Control is a held key too, even
+    /// though no `ModifiersChanged` ever reports it: the touch overlay knows
+    /// which keys its buttons are holding (`TouchInput::holds_key`).
     fn heal_hold_latches(&mut self) {
-        let (shift, control) = (self.modifiers.shift_key(), self.modifiers.control_key());
+        let touch = |key| self.touch.holds_key(key);
+        let shift = self.modifiers.shift_key()
+            || touch(KeyCode::ShiftLeft)
+            || touch(KeyCode::ShiftRight);
+        let control = self.modifiers.control_key()
+            || touch(KeyCode::ControlLeft)
+            || touch(KeyCode::ControlRight);
         if !shift {
             for key in [KeyCode::ShiftLeft, KeyCode::ShiftRight] {
                 self.physical_keys.remove(&key);

@@ -43,12 +43,28 @@ pub(super) struct TouchInput {
     custom_keys: std::collections::BTreeMap<u16, Vec<touch::CustomKey>>,
     /// The toggle buttons that are holding their keys down.
     toggled: BTreeSet<u16>,
+    /// Controls let go after the tick that last saw them: the game samples keys once a tick, so a
+    /// tap pressed and released in the same frame would otherwise be invisible to it (a double
+    /// tap of forward to sprint).
+    late_keys: Vec<(Control, u64)>,
+    /// When each held control went down, in ticks.
+    pressed_at: std::collections::BTreeMap<Control, u64>,
     /// The hide-HUD button was tapped: the HUD and this overlay are not drawn, but the buttons stay
     /// where they were, so a finger that remembers them can bring the HUD back.
     pub(super) hud_hidden: bool,
     /// The analog stick's `[left, forward]` while a finger holds it.
     analog: Option<[f32; 2]>,
     clock: Option<Instant>,
+}
+
+impl TouchInput {
+    /// Whether a finger-held button (or one toggled on) is holding `key` down.
+    pub(super) fn holds_key(&self, key: KeyCode) -> bool {
+        self.custom_keys
+            .values()
+            .flatten()
+            .any(|k| matches!(k, touch::CustomKey::Key(k) if *k == key))
+    }
 }
 
 /// A finger over a menu. Its press waits for a frame drawn with the pointer under it, and its release for a
@@ -259,10 +275,19 @@ impl Game<'_> {
             .into_iter()
             .partition(|(_, at)| ticks > *at || !playing);
         self.touch.late = keep;
+        let (keys_due, keys_keep) = std::mem::take(&mut self.touch.late_keys)
+            .into_iter()
+            .partition(|(_, at)| ticks > *at || !playing);
+        self.touch.late_keys = keys_keep;
         let scale = self.touch_batch().map_or(1.0, |b| b.scale);
         let result = due
             .into_iter()
             .try_for_each(|(button, _)| self.play_mouse(button, false))
+            .and_then(|()| {
+                keys_due
+                    .into_iter()
+                    .try_for_each(|(control, at)| self.touch_release_late(event_loop, control, at))
+            })
             .and_then(|()| self.touch_act(event_loop, out, scale));
         if let Err(e) = result {
             log::warn!("Horizon: touch: {e}");
@@ -328,6 +353,20 @@ impl Game<'_> {
                 }
                 Out::Press(control) | Out::Release(control) => {
                     let pressed = matches!(o, Out::Press(_));
+                    if pressed {
+                        self.touch.pressed_at.insert(control, self.ticks);
+                    } else if self
+                        .touch
+                        .pressed_at
+                        .get(&control)
+                        .is_some_and(|&at| at == self.ticks)
+                    {
+                        // Down and up before a tick could sample it: let go after the next one.
+                        self.touch.late_keys.push((control, self.ticks));
+                        continue;
+                    } else {
+                        self.touch.pressed_at.remove(&control);
+                    }
                     match control {
                         Control::Custom(id) => {
                             self.touch_custom_key(event_loop, id, pressed)?;
@@ -379,6 +418,29 @@ impl Game<'_> {
             }
         }
         Ok(())
+    }
+
+    /// A tap let go after the tick that first saw it (`late_keys`): a press and release in one
+    /// frame would otherwise leave the game's once-a-tick key sampling with nothing to see.
+    fn touch_release_late(
+        &mut self,
+        event_loop: &dyn EventLoopCtl,
+        control: Control,
+        at: u64,
+    ) -> Result<()> {
+        if self.touch.pressed_at.get(&control) != Some(&at) {
+            // Pressed again since: that press's own release lets go.
+            return Ok(());
+        }
+        self.touch.pressed_at.remove(&control);
+        match control {
+            // The same path as a live release: a toggle button ignores it.
+            Control::Custom(id) => self.touch_custom_key(event_loop, id, false),
+            _ => match key_of(control) {
+                Some(key) => self.mapped_key(key, false, false, key),
+                None => Ok(()),
+            },
+        }
     }
 
     /// The analog stick's `[left, forward]`, `None` while no finger holds it.
