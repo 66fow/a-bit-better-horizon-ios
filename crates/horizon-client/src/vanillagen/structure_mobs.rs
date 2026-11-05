@@ -12,7 +12,6 @@ use crate::{
         spawning::{LocalDifficulty, MOON_BRIGHTNESS},
     },
 };
-use chrono::Datelike;
 use horizon_core::{
     geometry::{Aabb, Vec3},
     random::{LegacyRandom, RandomSource, XoroshiroRandom},
@@ -64,8 +63,6 @@ pub struct StructureMobFinalizer {
     /// The level's difficulty (0 peaceful to 3 hard) and overworld clock.
     difficulty: AtomicU8,
     day_time: AtomicI64,
-    #[cfg(test)]
-    halloween_override: OnceLock<bool>,
 }
 impl StructureMobFinalizer {
     pub fn new(root: PathBuf, dimension: &str) -> Self {
@@ -75,8 +72,6 @@ impl StructureMobFinalizer {
             data: OnceLock::new(),
             difficulty: AtomicU8::new(2),
             day_time: AtomicI64::new(0),
-            #[cfg(test)]
-            halloween_override: OnceLock::new(),
         }
     }
     pub fn set_conditions(&self, difficulty: u8, day_time: i64) {
@@ -92,7 +87,6 @@ struct Level<'a> {
     difficulty: u8,
     day_time: i64,
     next_id: u32,
-    halloween: bool,
 }
 impl FinalizeLevel for Level<'_> {
     fn biome(&self, _: [i32; 3]) -> String {
@@ -126,7 +120,7 @@ impl FinalizeLevel for Level<'_> {
         self.day_time
     }
     fn halloween(&self) -> bool {
-        self.halloween
+        finalize::is_halloween()
     }
     fn create(&mut self, kind: &str, _: Reason) -> Option<Mob> {
         if self.difficulty == 0 && !finalize::allowed_in_peaceful(kind) {
@@ -166,7 +160,8 @@ fn run<R: RandomSource>(
 /// The saved compound of mob `i` with the mobs riding it under `Passengers`.
 fn tree(mobs: &[(Mob, Option<Tag>)], i: usize, dimension: &str) -> Compound {
     let (m, raw) = &mobs[i];
-    let Tag::Compound(mut c) = entity_nbt::mob_to_nbt(m, [0; 4], raw.as_ref()) else {
+    // No block registry here: a carried block stays as the template had it.
+    let Tag::Compound(mut c) = entity_nbt::mob_to_nbt(m, [0; 4], raw.as_ref(), None) else {
         return Compound::new();
     };
     c.remove(&"UUID".into());
@@ -208,7 +203,7 @@ impl StructureMobs for StructureMobFinalizer {
         if let Tag::Compound(c) = &mut raw {
             c.remove(&"horizon:finalize".into());
         }
-        let Some(m) = entity_nbt::mob_from_nbt(&raw, &data.types, 1) else {
+        let Some(m) = entity_nbt::mob_from_nbt(&raw, &data.types, 1, None) else {
             // Not a mob: vanilla finalizes only Mob instances.
             return true;
         };
@@ -275,20 +270,7 @@ impl StructureMobFinalizer {
     ) -> Option<Compound> {
         let base = self.difficulty.load(Ordering::Relaxed);
         let day_time = self.day_time.load(Ordering::Relaxed);
-        let calendar = || {
-            let today = chrono::Local::now();
-            (today.month(), today.day()) == (10, 31)
-        };
-        #[cfg(test)]
-        let halloween = self
-            .halloween_override
-            .get()
-            .copied()
-            .unwrap_or_else(calendar);
-        #[cfg(not(test))]
-        let halloween = calendar();
         let mut level = Level {
-            halloween,
             data,
             biome,
             structures,
@@ -474,13 +456,6 @@ mod tests {
             dimension,
         )
         .unwrap();
-        // The reference captures were made outside Halloween. Fix the fixture's
-        // calendar, not the process environment, so parallel tests stay independent.
-        terrain
-            .structure_mobs
-            .halloween_override
-            .set(false)
-            .unwrap();
         let mut worker = terrain.worker();
         let mut region: [Proto; 9] = std::array::from_fn(|i| {
             terrain.proto(&mut worker, x + i as i32 % 3 - 1, z + i as i32 / 3 - 1)

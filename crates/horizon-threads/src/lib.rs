@@ -1,7 +1,40 @@
 //! Scheduling hints for the game's threads and its allocator: the few OS calls
 //! that the other crates, which forbid unsafe code, can't make themselves.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+/// The game window's boot screen, before wgpu's first frame paints over it.
+#[cfg(target_os = "windows")]
+pub mod boot_paint;
+pub mod capped;
+pub mod heap_census;
+pub mod jobs;
+pub mod memory_limit;
+
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
+
+/// The worker threads the machine offers this process: `available_parallelism`'s
+/// answer (its share of the cores — CPU affinity, a container's quota), resolved
+/// once, since it doesn't change under a run and asking again on a later path
+/// can only disagree with the pools already started. `HORIZON_WORKER_THREADS`
+/// sets it instead, to cap every pool on a machine whose OS reports more cores
+/// than a run should take; a value that isn't a positive number is ignored.
+/// Each pool keeps its own share of the count (the streaming pool all but one,
+/// far decoration a third of it).
+pub fn worker_count() -> usize {
+    static COUNT: OnceLock<usize> = OnceLock::new();
+    *COUNT.get_or_init(|| {
+        parse_worker_count(std::env::var("HORIZON_WORKER_THREADS").ok())
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+    })
+}
+
+/// `Some(n)` when `value` names a positive count (`" 4 "` counts; `"0"`,
+/// `"lots"`, a missing variable don't).
+fn parse_worker_count(value: Option<String>) -> Option<usize> {
+    value?.trim().parse().ok().filter(|&n| n > 0)
+}
 
 /// Ask the OS to run the calling thread ahead of the process's other
 /// threads, as vanilla's `MinecraftServer.spin` does for its server thread
@@ -127,23 +160,68 @@ fn behind() -> bool {
     false
 }
 
-/// Run the calling thread behind the frame and the server but still at a
-/// steady pace: utility quality of service on Apple, where `behind_server` has
-/// no nice level to lower (far terrain, work no frame waits for but that
-/// should keep up). Whether the OS took it.
-pub fn utility_current() -> bool {
-    utility()
+/// Called by a far terrain thread as it starts (sampling, meshing and decorating
+/// distant tiles): work the near chunks, the ticks and the frames must never
+/// wait behind. On Linux and Android that is `behind_server`. On macOS and
+/// Windows, where `behind_server` changes nothing, the thread lowers itself one
+/// step: utility quality of service on macOS (background would throttle it to a
+/// crawl on battery) and below-normal priority on Windows, so the helpers that
+/// mesh and light the chunks around the player go first. Whether the OS took it.
+pub fn far_terrain_current() -> bool {
+    far()
+}
+
+#[cfg(not(any(target_vendor = "apple", windows)))]
+fn far() -> bool {
+    behind_server()
 }
 
 #[cfg(target_vendor = "apple")]
-fn utility() -> bool {
+fn far() -> bool {
     // SAFETY: sets the calling thread's own QoS class; no pointers.
     unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) == 0 }
 }
 
-#[cfg(not(target_vendor = "apple"))]
-fn utility() -> bool {
+#[cfg(windows)]
+fn far() -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+    };
+    // SAFETY: GetCurrentThread's pseudo handle needs no closing.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) != 0 }
+}
+
+/// For a far terrain thread that `far_terrain_current` lowered: behind the
+/// near terrain while it loads (`behind`), and back to the default once it
+/// is in. Kept at utility quality of service for good, macOS ran the far
+/// terrain on the efficiency cores long after the near chunks were in, and
+/// it took minutes to settle. On Linux and Android an unprivileged thread
+/// can't raise its priority again: it stays behind (`behind_server`), as it
+/// always has there, and this changes nothing. Whether the OS took it.
+#[cfg(any(target_vendor = "apple", windows))]
+pub fn far_terrain_behind(behind: bool) -> bool {
+    // Both set the class or priority outright: calling again is harmless.
+    if behind { far() } else { far_back() }
+}
+
+#[cfg(not(any(target_vendor = "apple", windows)))]
+pub fn far_terrain_behind(_behind: bool) -> bool {
     false
+}
+
+#[cfg(target_vendor = "apple")]
+fn far_back() -> bool {
+    // SAFETY: sets the calling thread's own QoS class; no pointers.
+    unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_DEFAULT, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn far_back() -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_NORMAL,
+    };
+    // SAFETY: GetCurrentThread's pseudo handle needs no closing.
+    unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL) != 0 }
 }
 
 /// Run the calling thread only on a core nothing else wants: work that may
@@ -205,7 +283,11 @@ pub fn catch_stop_signals() {
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         // SAFETY: the handler only touches an atomic and calls _exit, both async-signal-safe.
         unsafe {
-            libc::signal(signal, handler as libc::sighandler_t);
+            // A signal ignored from the start stays ignored, as the JVM leaves it (`nohup`'s SIGHUP:
+            // a server started that way outlives its terminal).
+            if libc::signal(signal, handler as libc::sighandler_t) == libc::SIG_IGN {
+                libc::signal(signal, libc::SIG_IGN);
+            }
         }
     }
 }
@@ -218,7 +300,22 @@ pub fn catch_stop_signals() {}
 /// World generation, meshing and the tick allocate and free small blocks on
 /// every worker at once; the system heaps serialise them (Windows' heap was
 /// 16% of a chunk's generation time), mimalloc keeps a heap per thread.
-pub use mimalloc::MiMalloc as Allocator;
+///
+/// It sits behind [`capped`]'s hard ceiling: with none set, every request is
+/// passed on unchanged and only the byte counter moves.
+pub use capped::{ALLOCATOR, Allocator};
+
+/// The global allocator of a build with the `alloc-census` feature: live
+/// heap bytes by startup step and thread, for `horizon-ctl memory`.
+pub use heap_census::CensusAllocator;
+/// Whether this build counts the heap by tag (feature `alloc-census`).
+pub const HEAP_CENSUS: bool = cfg!(feature = "alloc-census");
+/// Tag the calling thread's allocations `name` while the guard lives, in a
+/// build that counts the heap ([`HEAP_CENSUS`]); nothing otherwise.
+#[inline]
+pub fn heap_tag(name: &'static str) -> Option<heap_census::Tag> {
+    HEAP_CENSUS.then(|| heap_census::tag(name))
+}
 
 /// `mi_option_purge_delay` in mimalloc.h (index 15 in v2 and v3); the bindings
 /// don't name it.
@@ -233,6 +330,36 @@ pub fn configure_allocator() {
     unsafe {
         libmimalloc_sys::mi_option_set(PURGE_DELAY, 0);
     }
+}
+
+/// The bytes the allocator has committed now and at its peak (mimalloc's
+/// process info), for `horizon-ctl memory`.
+pub fn allocator_commit() -> (usize, usize) {
+    let mut info = [0usize; 8];
+    let [
+        elapsed,
+        user,
+        system,
+        rss,
+        peak_rss,
+        commit,
+        peak_commit,
+        faults,
+    ] = &mut info;
+    // SAFETY: writes eight integers through pointers to them.
+    unsafe {
+        libmimalloc_sys::mi_process_info(
+            elapsed,
+            user,
+            system,
+            rss,
+            peak_rss,
+            commit,
+            peak_commit,
+            faults,
+        );
+    }
+    (info[5], info[6])
 }
 
 /// Give back to the OS the memory the allocator holds free, after something
@@ -270,6 +397,269 @@ fn release() {
 
 #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_vendor = "apple")))]
 fn release() {}
+
+/// The REPARSE_DATA_BUFFER of a mount point naming `name` (UTF-16, `\??\` prefixed). The length
+/// fields are 16 bits: a name too long for them is an error, so the caller copies instead.
+#[cfg(windows)]
+fn mount_point_buffer(name: &[u16]) -> std::io::Result<Vec<u8>> {
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    let too_long = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+    let name_bytes = u16::try_from(name.len() * 2).map_err(|_| too_long())?;
+    // Substitute name, its NUL, then an empty print name and its NUL.
+    let print_offset = name_bytes.checked_add(2).ok_or_else(too_long)?;
+    let data_len = name_bytes.checked_add(12).ok_or_else(too_long)?;
+    let mut buffer = Vec::with_capacity(16 + name.len() * 2 + 4);
+    buffer.extend(IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buffer.extend(data_len.to_le_bytes());
+    buffer.extend(0u16.to_le_bytes());
+    buffer.extend(0u16.to_le_bytes());
+    buffer.extend(name_bytes.to_le_bytes());
+    buffer.extend(print_offset.to_le_bytes());
+    buffer.extend(0u16.to_le_bytes());
+    buffer.extend(name.iter().flat_map(|c| c.to_le_bytes()));
+    buffer.extend([0; 4]);
+    Ok(buffer)
+}
+
+/// A directory junction, which Windows creates without privileges (a directory symlink needs
+/// developer mode): the resource pack overlay links its untouched directories with them.
+#[cfg(windows)]
+pub fn junction(target: &std::path::Path, at: &std::path::Path) -> std::io::Result<()> {
+    // What `mklink /J` does, without its ~100 ms `cmd` process per directory: an empty
+    // directory given a mount point reparse point (REPARSE_DATA_BUFFER) naming the target.
+    use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+    let target = std::path::absolute(target)?;
+    let target = target.as_os_str().to_string_lossy();
+    let target = target.strip_prefix(r"\\?\").unwrap_or(&target);
+    let name: Vec<u16> = std::ffi::OsStr::new(&format!(r"\??\{target}"))
+        .encode_wide()
+        .collect();
+    let buffer = mount_point_buffer(&name)?;
+    std::fs::create_dir(at)?;
+    let set = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(at)
+        .and_then(|dir| {
+            let mut returned = 0;
+            // SAFETY: a live directory handle, and `buffer` outlives the call.
+            let ok = unsafe {
+                windows_sys::Win32::System::IO::DeviceIoControl(
+                    dir.as_raw_handle(),
+                    FSCTL_SET_REPARSE_POINT,
+                    buffer.as_ptr().cast(),
+                    buffer.len() as u32,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    if set.is_err() {
+        let _ = std::fs::remove_dir(at);
+    }
+    set
+}
+
+/// Keep this process's standard handles out of the processes it starts. Windows hands a child
+/// every inheritable handle of its parent, not only the three standard handles it is given
+/// (CreateProcessW with bInheritHandles, as `std::process::Command` starts it). horizon-ctl's own
+/// standard handles are inheritable when its caller gave it pipes (a script that reads its output,
+/// an MCP client), so the game it launches would hold the caller's pipe open for its whole life and
+/// the caller, waiting for the end of horizon-ctl's output, would wait until the game quits. A
+/// child given `Stdio::inherit()` still gets them: `Command` duplicates the handles it passes.
+/// Unix needs none of this: a child's 0-2 are replaced and the rest are close-on-exec.
+#[cfg(windows)]
+pub fn keep_stdio_from_children() {
+    use windows_sys::Win32::Foundation::{
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: GetStdHandle has no preconditions; SetHandleInformation only gets a handle this
+        // process holds, and when it fails (no console, a pseudo-handle) the handle stays as it was.
+        unsafe {
+            let handle = GetStdHandle(which);
+            if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Without `HORIZON_WORKER_THREADS`, the count is the machine's.
+    #[test]
+    fn worker_count_defaults_to_the_machine() {
+        if std::env::var_os("HORIZON_WORKER_THREADS").is_some() {
+            return;
+        }
+        let machine = std::thread::available_parallelism().map_or(1, |n| n.get());
+        assert_eq!(super::worker_count(), machine);
+    }
+
+    /// Only a positive number overrides the machine's count.
+    #[test]
+    fn worker_count_override_parses() {
+        for (value, parsed) in [
+            (None, None),
+            (Some("4"), Some(4)),
+            (Some(" 4 "), Some(4)),
+            (Some("0"), None),
+            (Some("-2"), None),
+            (Some("lots"), None),
+            (Some(""), None),
+        ] {
+            assert_eq!(super::parse_worker_count(value.map(String::from)), parsed);
+        }
+    }
+
+    /// After it, this process's standard output is no longer handed to the processes it starts.
+    #[cfg(windows)]
+    #[test]
+    fn standard_handles_stay_out_of_children() {
+        use windows_sys::Win32::Foundation::{
+            GetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        };
+        use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+        super::keep_stdio_from_children();
+        // SAFETY: reads the flags of this process's own standard output handle.
+        unsafe {
+            let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+            let mut flags = 0;
+            if !handle.is_null()
+                && handle != INVALID_HANDLE_VALUE
+                && GetHandleInformation(handle, &mut flags) != 0
+            {
+                assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+
+    /// The hint holds on the platforms that take it.
+    #[test]
+    fn favouring_a_thread_takes_where_the_os_allows_it() {
+        let took = std::thread::spawn(super::favour).join().unwrap();
+        assert_eq!(took, cfg!(any(target_vendor = "apple", windows)));
+        #[cfg(target_vendor = "apple")]
+        std::thread::spawn(|| {
+            assert!(super::favour());
+            let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
+            let mut relative = 0;
+            // SAFETY: reads the calling thread's own QoS class into locals.
+            let read = unsafe {
+                libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative)
+            };
+            assert_eq!(read, 0);
+            assert!(matches!(
+                class,
+                libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE
+            ));
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// A helper goes behind only once a dedicated server asks for it, and
+    /// then, on Linux and Android, 10 nice levels below the process or in the idle class.
+    #[test]
+    fn helpers_go_behind_only_when_asked() {
+        assert!(!std::thread::spawn(super::behind_server).join().unwrap());
+        super::put_helpers_behind();
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        std::thread::spawn(|| {
+            // SAFETY: reads the calling thread's own nice value.
+            let before = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) };
+            assert!(super::behind_server());
+            // SAFETY: reads the calling thread's own nice value and policy.
+            let (after, policy) = unsafe {
+                (
+                    libc::getpriority(libc::PRIO_PROCESS as _, 0),
+                    libc::sched_getscheduler(0),
+                )
+            };
+            if before + super::BEHIND <= 19 {
+                assert_eq!(after, before + super::BEHIND);
+            } else {
+                assert_eq!(policy, libc::SCHED_IDLE);
+            }
+        })
+        .join()
+        .unwrap();
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        assert!(!std::thread::spawn(super::behind_server).join().unwrap());
+    }
+
+    /// The idle hint holds on the three platforms.
+    #[test]
+    fn idling_a_thread_takes() {
+        let took = std::thread::spawn(super::idle_current).join().unwrap();
+        assert_eq!(
+            took,
+            cfg!(any(target_os = "linux", target_vendor = "apple", windows))
+        );
+        #[cfg(target_os = "linux")]
+        std::thread::spawn(|| {
+            assert!(super::idle_current());
+            // SAFETY: reads the calling thread's own policy.
+            assert_eq!(unsafe { libc::sched_getscheduler(0) }, libc::SCHED_IDLE);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// The option set is the purge delay: mimalloc v3's default for it is
+    /// 1000 ms, and it is 0 once configured.
+    #[test]
+    fn configuring_the_allocator_purges_at_once() {
+        // SAFETY: reads and sets one integer option.
+        let get = || unsafe { libmimalloc_sys::mi_option_get(super::PURGE_DELAY) };
+        if std::env::var_os("MIMALLOC_PURGE_DELAY").is_none() {
+            assert_eq!(get(), 1000);
+        }
+        super::configure_allocator();
+        assert_eq!(get(), 0);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod junction_tests {
+    #[test]
+    fn mount_point_buffer_layout() {
+        let name: Vec<u16> = r"\??\C:\a".encode_utf16().collect();
+        let bytes = u16::try_from(name.len() * 2).unwrap();
+        let buffer = super::mount_point_buffer(&name).unwrap();
+        assert_eq!(buffer[..4], 0xA000_0003u32.to_le_bytes());
+        assert_eq!(buffer[4..6], (bytes + 12).to_le_bytes());
+        assert_eq!(buffer[8..10], 0u16.to_le_bytes());
+        assert_eq!(buffer[10..12], bytes.to_le_bytes());
+        assert_eq!(buffer[12..14], (bytes + 2).to_le_bytes());
+        assert_eq!(buffer.len(), 16 + usize::from(bytes) + 4);
+        // Past the 8-byte header, the length field counts the rest of the buffer.
+        assert_eq!(usize::from(bytes) + 12, buffer.len() - 8);
+    }
+
+    #[test]
+    fn names_too_long_for_the_length_fields_are_errors() {
+        // 32764 units is 65528 bytes: the name fits, its length field sums do not.
+        let name = vec![b'a' as u16; 32_764];
+        assert!(super::mount_point_buffer(&name).is_err());
+        assert!(super::mount_point_buffer(&vec![0; 32_768]).is_err());
+        assert!(super::mount_point_buffer(&[0; 100]).is_ok());
+    }
+}
 
 /// The process's memory, in bytes. `footprint` is `phys_footprint`, the figure
 /// iOS' Jetsam compares against the device's limit (compressed pages included);
@@ -431,189 +821,3 @@ fn available_memory() -> Option<usize> {
     None
 }
 
-/// The REPARSE_DATA_BUFFER of a mount point naming `name` (UTF-16, `\??\` prefixed). The length
-/// fields are 16 bits: a name too long for them is an error, so the caller copies instead.
-#[cfg(windows)]
-fn mount_point_buffer(name: &[u16]) -> std::io::Result<Vec<u8>> {
-    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
-    let too_long = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
-    let name_bytes = u16::try_from(name.len() * 2).map_err(|_| too_long())?;
-    // Substitute name, its NUL, then an empty print name and its NUL.
-    let print_offset = name_bytes.checked_add(2).ok_or_else(too_long)?;
-    let data_len = name_bytes.checked_add(12).ok_or_else(too_long)?;
-    let mut buffer = Vec::with_capacity(16 + name.len() * 2 + 4);
-    buffer.extend(IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
-    buffer.extend(data_len.to_le_bytes());
-    buffer.extend(0u16.to_le_bytes());
-    buffer.extend(0u16.to_le_bytes());
-    buffer.extend(name_bytes.to_le_bytes());
-    buffer.extend(print_offset.to_le_bytes());
-    buffer.extend(0u16.to_le_bytes());
-    buffer.extend(name.iter().flat_map(|c| c.to_le_bytes()));
-    buffer.extend([0; 4]);
-    Ok(buffer)
-}
-
-/// A directory junction, which Windows creates without privileges (a directory symlink needs
-/// developer mode): the resource pack overlay links its untouched directories with them.
-#[cfg(windows)]
-pub fn junction(target: &std::path::Path, at: &std::path::Path) -> std::io::Result<()> {
-    // What `mklink /J` does, without its ~100 ms `cmd` process per directory: an empty
-    // directory given a mount point reparse point (REPARSE_DATA_BUFFER) naming the target.
-    use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
-    let target = std::path::absolute(target)?;
-    let target = target.as_os_str().to_string_lossy();
-    let target = target.strip_prefix(r"\\?\").unwrap_or(&target);
-    let name: Vec<u16> = std::ffi::OsStr::new(&format!(r"\??\{target}"))
-        .encode_wide()
-        .collect();
-    let buffer = mount_point_buffer(&name)?;
-    std::fs::create_dir(at)?;
-    let set = std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
-        .open(at)
-        .and_then(|dir| {
-            let mut returned = 0;
-            // SAFETY: a live directory handle, and `buffer` outlives the call.
-            let ok = unsafe {
-                windows_sys::Win32::System::IO::DeviceIoControl(
-                    dir.as_raw_handle(),
-                    FSCTL_SET_REPARSE_POINT,
-                    buffer.as_ptr().cast(),
-                    buffer.len() as u32,
-                    std::ptr::null_mut(),
-                    0,
-                    &mut returned,
-                    std::ptr::null_mut(),
-                )
-            };
-            if ok == 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        });
-    if set.is_err() {
-        let _ = std::fs::remove_dir(at);
-    }
-    set
-}
-
-#[cfg(test)]
-mod tests {
-    /// The hint holds on the platforms that take it.
-    #[test]
-    fn favouring_a_thread_takes_where_the_os_allows_it() {
-        let took = std::thread::spawn(super::favour).join().unwrap();
-        assert_eq!(took, cfg!(any(target_vendor = "apple", windows)));
-        #[cfg(target_vendor = "apple")]
-        std::thread::spawn(|| {
-            assert!(super::favour());
-            let mut class = libc::qos_class_t::QOS_CLASS_UNSPECIFIED;
-            let mut relative = 0;
-            // SAFETY: reads the calling thread's own QoS class into locals.
-            let read = unsafe {
-                libc::pthread_get_qos_class_np(libc::pthread_self(), &mut class, &mut relative)
-            };
-            assert_eq!(read, 0);
-            assert!(matches!(
-                class,
-                libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE
-            ));
-        })
-        .join()
-        .unwrap();
-    }
-
-    /// A helper goes behind only once a dedicated server asks for it, and
-    /// then, on Linux and Android, 10 nice levels below the process or in the idle class.
-    #[test]
-    fn helpers_go_behind_only_when_asked() {
-        assert!(!std::thread::spawn(super::behind_server).join().unwrap());
-        super::put_helpers_behind();
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        std::thread::spawn(|| {
-            // SAFETY: reads the calling thread's own nice value.
-            let before = unsafe { libc::getpriority(libc::PRIO_PROCESS as _, 0) };
-            assert!(super::behind_server());
-            // SAFETY: reads the calling thread's own nice value and policy.
-            let (after, policy) = unsafe {
-                (
-                    libc::getpriority(libc::PRIO_PROCESS as _, 0),
-                    libc::sched_getscheduler(0),
-                )
-            };
-            if before + super::BEHIND <= 19 {
-                assert_eq!(after, before + super::BEHIND);
-            } else {
-                assert_eq!(policy, libc::SCHED_IDLE);
-            }
-        })
-        .join()
-        .unwrap();
-        #[cfg(not(any(target_os = "linux", target_os = "android")))]
-        assert!(!std::thread::spawn(super::behind_server).join().unwrap());
-    }
-
-    /// The idle hint holds on the three platforms.
-    #[test]
-    fn idling_a_thread_takes() {
-        let took = std::thread::spawn(super::idle_current).join().unwrap();
-        assert_eq!(
-            took,
-            cfg!(any(target_os = "linux", target_vendor = "apple", windows))
-        );
-        #[cfg(target_os = "linux")]
-        std::thread::spawn(|| {
-            assert!(super::idle_current());
-            // SAFETY: reads the calling thread's own policy.
-            assert_eq!(unsafe { libc::sched_getscheduler(0) }, libc::SCHED_IDLE);
-        })
-        .join()
-        .unwrap();
-    }
-
-    /// The option set is the purge delay: mimalloc v3's default for it is
-    /// 1000 ms, and it is 0 once configured.
-    #[test]
-    fn configuring_the_allocator_purges_at_once() {
-        // SAFETY: reads and sets one integer option.
-        let get = || unsafe { libmimalloc_sys::mi_option_get(super::PURGE_DELAY) };
-        if std::env::var_os("MIMALLOC_PURGE_DELAY").is_none() {
-            assert_eq!(get(), 1000);
-        }
-        super::configure_allocator();
-        assert_eq!(get(), 0);
-    }
-}
-
-#[cfg(all(test, windows))]
-mod junction_tests {
-    #[test]
-    fn mount_point_buffer_layout() {
-        let name: Vec<u16> = r"\??\C:\a".encode_utf16().collect();
-        let bytes = u16::try_from(name.len() * 2).unwrap();
-        let buffer = super::mount_point_buffer(&name).unwrap();
-        assert_eq!(buffer[..4], 0xA000_0003u32.to_le_bytes());
-        assert_eq!(buffer[4..6], (bytes + 12).to_le_bytes());
-        assert_eq!(buffer[8..10], 0u16.to_le_bytes());
-        assert_eq!(buffer[10..12], bytes.to_le_bytes());
-        assert_eq!(buffer[12..14], (bytes + 2).to_le_bytes());
-        assert_eq!(buffer.len(), 16 + usize::from(bytes) + 4);
-        // Past the 8-byte header, the length field counts the rest of the buffer.
-        assert_eq!(usize::from(bytes) + 12, buffer.len() - 8);
-    }
-
-    #[test]
-    fn names_too_long_for_the_length_fields_are_errors() {
-        // 32764 units is 65528 bytes: the name fits, its length field sums do not.
-        let name = vec![b'a' as u16; 32_764];
-        assert!(super::mount_point_buffer(&name).is_err());
-        assert!(super::mount_point_buffer(&vec![0; 32_768]).is_err());
-        assert!(super::mount_point_buffer(&[0; 100]).is_ok());
-    }
-}

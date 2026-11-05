@@ -355,7 +355,7 @@ fn centre(p: [i32; 3]) -> [f64; 3] {
 fn can_spawn_on(b: &Blocks, pos: [i32; 3], state: BlockStateId, above: BlockStateId) -> bool {
     let mut scene = SceneCollisions {
         world: b.w.world,
-        binding: b.w.collision,
+        binding: &b.w.collision,
         subject: None,
     };
     let above_pos = [pos[0], pos[1] + 1, pos[2]];
@@ -418,7 +418,7 @@ fn spawn_protector(
         );
         let mut scene = SceneCollisions {
             world: w.world,
-            binding: w.collision,
+            binding: &w.collision,
             subject: None,
         };
         if !scene.unobstructed(bounds).unwrap_or(false) {

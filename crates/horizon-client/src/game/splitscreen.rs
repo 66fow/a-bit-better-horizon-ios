@@ -8,6 +8,7 @@
 //! (game/screens.rs); the second player leaving the world, the first leaving theirs, or the AirPlay display
 //! going away ends it too.
 use super::{Game, UiResources};
+use crate::game::event_loop::EventLoopCtl;
 use horizon_client::{Result, audio::Audio, hud::HudAtlas};
 use std::time::Instant;
 use winit::{application::ApplicationHandler, event::WindowEvent};
@@ -54,7 +55,9 @@ impl<'a> Game<'a> {
         let player = horizon_client::auth::current()
             .map_or_else(|| self.options.player_name(), |a| a.name.clone());
         let name = guest_name(&player);
-        let pipe = server.join_splitscreen(horizon_protocol::crypto::offline_uuid(&name))?;
+        let pipe = server
+            .join_split(&name)
+            .ok_or("the integrated server did not answer")?;
         // A client and nothing else: no control socket, no benchmark, no world of its own to open.
         let mut options = self.options.clone();
         options.control = None;
@@ -105,7 +108,9 @@ impl<'a> Game<'a> {
 
     fn end_splitscreen(&mut self) {
         if let Some(server) = &self.integrated {
-            server.leave_splitscreen();
+            let player = horizon_client::auth::current()
+                .map_or_else(|| self.options.player_name(), |a| a.name.clone());
+            server.leave_split(&guest_name(&player));
         }
         self.splitscreen.active = false;
         horizon_airplay::phone_shows_game(false);
@@ -125,11 +130,11 @@ impl<'a> Game<'a> {
         }
     }
 
-    pub(super) fn poll_splitscreen(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+    pub(super) fn poll_splitscreen(&mut self, event_loop: &dyn EventLoopCtl) {
         let mut guest = self.splitscreen_guest.take();
         update(self, &mut guest);
         if let Some(second) = &mut guest {
-            second.about_to_wait(event_loop);
+            second.idle(event_loop);
         }
         update(self, &mut guest);
         self.splitscreen_guest = guest;

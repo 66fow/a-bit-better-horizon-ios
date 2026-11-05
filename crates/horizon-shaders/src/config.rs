@@ -5,13 +5,19 @@
 //!
 //! Everything is read from live code only: the preprocessor has already dropped the false
 //! branches, so a format chosen by an option is the one the option selects. Every stage file of
-//! the programs that run is read (OQ-17); a later file overrides an earlier one, with a note when
-//! the values differ.
+//! the programs that run is read (OQ-17), and the shadow programs' when the shadow pass doesn't
+//! run; a later file overrides an earlier one, with a note when the values differ. A colortex
+//! format counts only in a fragment stage, and in a block comment only where `const` starts its
+//! line, as Iris 1.11.7 read our probes ([`Config::read_vertex`], [`Config::read`]).
 
 use crate::Preprocessed;
 
 /// colortex buffers (6.1.1).
 pub const BUFFERS: usize = 16;
+
+/// The shadowcolor buffers there are: two, and `shadowcolor2` to `shadowcolor7` for a pack that
+/// names the `HIGHER_SHADOWCOLOR` feature.
+pub const SHADOW_COLORS: usize = 8;
 
 /// A colour format of 6.7, as channels, bits per channel and kind. Packed formats are described
 /// by their widest channel: `RGB10_A2` is 4 × 10 bits, `R11F_G11F_B10F` 3 × 11 bits float.
@@ -127,8 +133,13 @@ pub struct Shadow {
     pub distance: f32,
     /// `shadowDistanceRenderMul`: when > 0, geometry beyond `distance × mul` is not drawn.
     pub render_mul: f32,
+    /// `voxelDistance`: with `shadow.culling=reversed`, nothing within it is culled.
+    pub voxel_distance: f32,
     /// `shadowIntervalSize`: the shadow camera moves in steps of this many blocks (0: none).
     pub interval: f32,
+    /// Native packs: the snap's remainder is euclidean, so the centre is within half an interval
+    /// of the player at negative coordinates too. `shaders/` packs keep Iris's.
+    pub euclidean_snap: bool,
     /// `sunPathRotation`, degrees.
     pub sun_path_rotation: f32,
     /// `shadowMapFov`: a perspective projection of this many degrees instead of orthographic.
@@ -138,8 +149,13 @@ pub struct Shadow {
     pub far: f32,
     /// `shadowHardwareFiltering(0|1)`: shadowtex0/1 sampled with depth comparison.
     pub hardware_filtering: [bool; 2],
-    /// `shadowcolor0/1`: format, cleared every frame, clear colour (default white).
-    pub colors: [Buffer; 2],
+    /// `shadowtex0Nearest` (or `shadowtexNearest`, `shadow0MinMagNearest`) and
+    /// `shadowtex1Nearest` (or `shadow1MinMagNearest`): shadowtex0/1 read through a plain sampler
+    /// take the nearest texel. Otherwise Iris 1.11.7 filters them linearly (measured).
+    pub nearest: [bool; 2],
+    /// `shadowcolor0` to `shadowcolor7`: format, cleared every frame, clear colour (default
+    /// white).
+    pub colors: [Buffer; SHADOW_COLORS],
 }
 
 impl Default for Shadow {
@@ -152,42 +168,48 @@ impl Default for Shadow {
             resolution: 1024,
             distance: 160.0,
             render_mul: -1.0,
+            voxel_distance: 160.0,
             interval: 2.0,
+            euclidean_snap: false,
             sun_path_rotation: 0.0,
             fov: None,
             near: 0.05,
             far: 256.0,
             hardware_filtering: [false; 2],
-            colors: [white.clone(), white],
+            nearest: [false; 2],
+            colors: std::array::from_fn(|_| white.clone()),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
-    /// `ambientOcclusionLevel`: the pack's terrain AO strength, from zero to one.
-    pub ambient_occlusion_level: f32,
     pub buffers: [Buffer; BUFFERS],
     pub shadow: Shadow,
     /// Conflicting or unreadable settings, as `file:line: message`.
     pub notes: Vec<String>,
-    format_set: [bool; BUFFERS],
     /// Each setting read so far and its value, to report a later file changing it.
     seen: Vec<(String, String)>,
-    gdepth: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            ambient_occlusion_level: 1.0,
             buffers: std::array::from_fn(|_| Buffer::default()),
             shadow: Shadow::default(),
             notes: Vec::new(),
-            format_set: [false; BUFFERS],
             seen: Vec::new(),
-            gdepth: false,
         }
+    }
+}
+
+/// The shadowcolor buffer a sampler or image name reads: `shadowcolor` and `shadowcolor0` to
+/// `shadowcolor7`.
+pub fn shadow_color(name: &str) -> Option<usize> {
+    match name.strip_prefix("shadowcolor")?.as_bytes() {
+        [] => Some(0),
+        &[d @ b'0'..=b'7'] => Some(usize::from(d - b'0')),
+        _ => None,
     }
 }
 
@@ -211,49 +233,64 @@ pub fn buffer_index(name: &str) -> Option<usize> {
 }
 
 impl Config {
-    /// Reads one preprocessed stage file.
+    /// Reads one preprocessed fragment stage file.
     pub fn read(&mut self, pp: &Preprocessed) {
+        self.read_stage(pp, true, true);
+    }
+
+    /// Reads only the colortex formats of one preprocessed fragment stage file, as [`Self::read`]
+    /// reads them.
+    pub fn read_formats(&mut self, pp: &Preprocessed) {
+        self.read_stage(pp, true, false);
+    }
+
+    /// Reads one preprocessed vertex stage file. Its colortex formats don't count: Iris 1.11.7
+    /// ignored a `colortexNFormat` declared only in `composite.vsh`, `final.vsh`, `deferred.vsh`,
+    /// `gbuffers_terrain.vsh` or `shadow.vsh` of probe packs p9063a, p9063c and p9063s (ours),
+    /// while it honoured the same line in each program's fragment shader.
+    pub fn read_vertex(&mut self, pp: &Preprocessed) {
+        self.read_stage(pp, false, true);
+    }
+
+    /// `formats`: whether colortex formats count; `others`: whether every other setting does.
+    fn read_stage(&mut self, pp: &Preprocessed, formats: bool, others: bool) {
         let line = |at: usize| pp.locate(code_line(&pp.code, at));
         for (at, ty, name, value) in constants(&pp.code) {
             let place = line(at);
-            self.constant(&place, ty, name, value);
+            self.constant(&place, ty, name, value, formats, others);
         }
         for (origin, comment) in &pp.comments {
-            for (_, ty, name, value) in constants(comment) {
+            for (at, ty, name, value) in constants(comment) {
                 let file = pp
                     .files
                     .get(origin.file as usize)
                     .map_or("?", String::as_str);
                 let place = format!("{file}:{}", origin.line);
-                self.constant(&place, ty, name, value);
+                // Our probes' Iris 1.11.7 values fit this (a fit, not a rule Iris states): a
+                // `colortexNFormat` in a block comment counts only when `const` starts its line.
+                // Iris ignored one on the line of the `/*` (`/* const int colortex2Format =
+                // RGBA16F; */`), after a ` * `, and after another declaration on its line; it
+                // honoured one indented, one followed by text or by `*/`, and the first of two.
+                let starts_line = (comment[..at].rfind('\n'))
+                    .is_some_and(|n| comment[n + 1..at].trim().is_empty());
+                self.constant(&place, ty, name, value, formats && starts_line, others);
             }
-        }
-        if declares(&pp.code, "gdepth") {
-            self.gdepth = true;
         }
     }
 
-    /// The settings once every file is read: buffer 1 becomes RGBA32F when a program declares
-    /// `gdepth` and the pack gave it no format (6.1.3).
-    pub fn finish(mut self) -> Self {
-        if self.gdepth && !self.format_set[1] {
-            self.buffers[1].format = Format {
-                channels: 4,
-                bits: 32,
-                kind: Kind::Float,
-            };
-        }
-        self
-    }
-
-    fn constant(&mut self, place: &str, ty: &str, name: &str, value: &str) {
-        if ty == "float" && name == "ambientOcclusionLevel" {
-            match number(value).filter(|value| value.is_finite() && (0.0..=1.0).contains(value)) {
-                Some(value) => self.ambient_occlusion_level = value,
-                None => self.notes.push(format!(
-                    "{place}: ambientOcclusionLevel must be a finite float from 0 to 1"
-                )),
-            }
+    /// `formats`: whether a colortex format declared here counts; `others`: whether any other
+    /// setting does.
+    fn constant(
+        &mut self,
+        place: &str,
+        ty: &str,
+        name: &str,
+        value: &str,
+        formats: bool,
+        others: bool,
+    ) {
+        let format = ty == "int" && name.strip_suffix("Format").and_then(buffer_index).is_some();
+        if !others && !format {
             return;
         }
         if self.shadow_constant(ty, name, value) {
@@ -271,12 +308,12 @@ impl Config {
         }) else {
             return;
         };
+        if setting == "Format" && !formats {
+            return;
+        }
         let b = &mut self.buffers[buffer];
         let ok = match setting {
-            "Format" => Format::parse(value).map(|f| {
-                b.format = f;
-                self.format_set[buffer] = true;
-            }),
+            "Format" => Format::parse(value).map(|f| b.format = f),
             "ClearColor" => vec4(value).map(|c| b.clear_color = Some(c)),
             "Clear" => boolean(value).map(|v| b.clear = v),
             _ => boolean(value).map(|v| b.mipmap = v),
@@ -322,6 +359,7 @@ impl Config {
             }
             "shadowDistance" => float(&mut s.distance),
             "shadowDistanceRenderMul" => float(&mut s.render_mul),
+            "voxelDistance" => float(&mut s.voxel_distance),
             "shadowIntervalSize" => float(&mut s.interval),
             "sunPathRotation" => float(&mut s.sun_path_rotation),
             "shadowNearPlane" => float(&mut s.near),
@@ -337,14 +375,28 @@ impl Config {
                     s.hardware_filtering[usize::from(name.ends_with('1'))] = b;
                 }
             }
+            "shadowtexNearest" | "shadowtex0Nearest" | "shadow0MinMagNearest" => {
+                if let Some(b) = boolean(value) {
+                    s.nearest[0] = b;
+                }
+            }
+            "shadowtex1Nearest" | "shadow1MinMagNearest" => {
+                if let Some(b) = boolean(value) {
+                    s.nearest[1] = b;
+                }
+            }
             _ => {
-                let color = ["shadowcolor0", "shadowcolor1", "shadowcolor"]
-                    .iter()
-                    .find_map(|b| Some((b, name.strip_prefix(b)?)));
+                // `shadowcolor` is shadowcolor0.
+                let color =
+                    name.strip_prefix("shadowcolor")
+                        .map(|rest| match rest.as_bytes().first() {
+                            Some(&d @ b'0'..=b'7') => (usize::from(d - b'0'), &rest[1..]),
+                            _ => (0, rest),
+                        });
                 let Some((buffer, setting)) = color else {
                     return false;
                 };
-                let b = &mut s.colors[usize::from(buffer.ends_with('1'))];
+                let b = &mut s.colors[buffer];
                 match (setting, ty) {
                     ("Format", "int") => {
                         if let Some(f) = Format::parse(value) {
@@ -370,7 +422,7 @@ impl Config {
 }
 
 /// The buffers a fragment shader writes, from the last `DRAWBUFFERS` or `RENDERTARGETS` comment
-/// of its live code, or `None` without one (then it writes buffers 0 to 7). 6.1.4.
+/// of its live code, or `None` without one (then the program loader decides). 6.1.4.
 pub fn draw_buffers(pp: &Preprocessed) -> Option<Vec<u32>> {
     let mut found = None;
     for (_, comment) in &pp.comments {
@@ -422,43 +474,6 @@ fn constants(text: &str) -> Vec<(usize, &str, &str, &str)> {
     out
 }
 
-/// Whether `text` declares a uniform sampler called `name`.
-fn declares(text: &str, name: &str) -> bool {
-    let tokens: Vec<_> = crate::macros::lex(text)
-        .into_iter()
-        .filter(|s| !s.trim().is_empty())
-        .collect();
-    for (i, token) in tokens.iter().enumerate() {
-        if *token != "uniform" {
-            continue;
-        }
-        let mut at = i + 1;
-        while tokens
-            .get(at)
-            .is_some_and(|s| matches!(*s, "lowp" | "mediump" | "highp"))
-        {
-            at += 1;
-        }
-        if !tokens.get(at).is_some_and(|ty| ty.contains("sampler")) {
-            continue;
-        }
-        at += 1;
-        loop {
-            if tokens.get(at) == Some(&name) {
-                return true;
-            }
-            while tokens.get(at).is_some_and(|s| !matches!(*s, "," | ";")) {
-                at += 1;
-            }
-            if tokens.get(at) != Some(&",") {
-                break;
-            }
-            at += 1;
-        }
-    }
-    false
-}
-
 fn code_line(code: &str, at: usize) -> usize {
     code[..at].matches('\n').count()
 }
@@ -503,60 +518,6 @@ mod tests {
     }
 
     #[test]
-    fn ambient_occlusion_strength_is_a_finite_unit_interval() {
-        assert_eq!(Config::default().ambient_occlusion_level, 1.0);
-        for value in ["0.0", "0.375", "1.0"] {
-            let mut config = Config::default();
-            config.read(&stage(&format!(
-                "const float ambientOcclusionLevel = {value};"
-            )));
-            assert_eq!(
-                config.ambient_occlusion_level,
-                value.parse::<f32>().unwrap()
-            );
-            assert!(config.notes.is_empty());
-        }
-        for value in ["-0.01", "1.01", "NaN", "inf"] {
-            let mut config = Config::default();
-            config.read(&stage(&format!(
-                "const float ambientOcclusionLevel = {value};"
-            )));
-            assert_eq!(config.ambient_occlusion_level, 1.0);
-            assert!(
-                config
-                    .notes
-                    .iter()
-                    .any(|note| note.contains("ambientOcclusionLevel")),
-                "{value}"
-            );
-        }
-    }
-
-    #[test]
-    fn comma_separated_depth_sampler_keeps_float_precision() {
-        for source in [
-            "uniform sampler2D gdepth,gcolor;",
-            "uniform highp sampler2D gcolor,gdepth;",
-            "uniform sampler2D gcolor, gdepth, gnormal;",
-        ] {
-            let mut config = Config::default();
-            config.read(&stage(source));
-            assert_eq!(
-                config.finish().buffers[1].format,
-                Format::parse("RGBA32F").unwrap()
-            );
-        }
-        for source in [
-            "uniform sampler2D gdepthOther;",
-            "uniform float gdepth;",
-            "// uniform sampler2D gdepth;\nvoid main(){}",
-        ] {
-            let mut config = Config::default();
-            config.read(&stage(source));
-            assert_eq!(config.finish().buffers[1].format, Format::RGBA8);
-        }
-    }
-    #[test]
     fn formats_parse() {
         let f = |channels, bits, kind| {
             Some(Format {
@@ -599,7 +560,6 @@ mod tests {
         assert_eq!(draw_buffers(&pp), Some(vec![0, 2, 11]));
         let mut config = Config::default();
         config.read(&pp);
-        let config = config.finish();
         let b = &config.buffers;
         assert_eq!(b[2].format, Format::parse("RGBA16F").unwrap());
         assert_eq!(b[7].format, Format::parse("R32F").unwrap());
@@ -607,7 +567,9 @@ mod tests {
         assert_eq!(b[3].clear_color, Some([0.5, 0.25, 0.0, 1.0]));
         assert!(b[3].mipmap && !b[2].mipmap);
         assert_eq!(b[2].clear_color, Some([1.0; 4]));
-        assert_eq!(b[1].format, Format::parse("RGBA32F").unwrap(), "gdepth");
+        // Iris 1.11.7 kept RGBA8 for `gdepth` (colortex1) with no format given, in probe pack
+        // p9063b of ours; OptiFine's RGBA32F rule doesn't apply.
+        assert_eq!(b[1].format, Format::RGBA8, "gdepth");
         assert!(config.notes.is_empty(), "{:?}", config.notes);
     }
 
@@ -619,7 +581,7 @@ mod tests {
              const float sunPathRotation = -40.0;\nconst bool shadowHardwareFiltering = true;\n\
              /* const int shadowcolor1Format = RGBA16F; */\nconst bool shadowcolor0Clear = false;\n",
         ));
-        let s = c.finish().shadow;
+        let s = c.shadow;
         assert_eq!(
             (s.resolution, s.distance, s.sun_path_rotation),
             (2048, 128.0, -40.0)
@@ -631,22 +593,58 @@ mod tests {
         assert!(!s.colors[0].clear && s.colors[1].clear);
         assert_eq!(s.colors[1].format, Format::parse("RGBA16F").unwrap());
         assert_eq!(s.colors[1].clear_color, Some([1.0; 4]));
+        assert_eq!(s.nearest, [false; 2]);
+    }
+
+    #[test]
+    fn shadow_depth_filtering_settings() {
+        let nearest = |text: &str| {
+            let mut c = Config::default();
+            c.read(&stage(text));
+            c.shadow.nearest
+        };
+        assert_eq!(
+            nearest("const bool shadowtex0Nearest = true;\n"),
+            [true, false]
+        );
+        assert_eq!(
+            nearest("const bool shadowtexNearest = true;\n"),
+            [true, false]
+        );
+        assert_eq!(
+            nearest("const bool shadow0MinMagNearest = true;\n"),
+            [true, false]
+        );
+        assert_eq!(
+            nearest("const bool shadowtex1Nearest = true;\n"),
+            [false, true]
+        );
+        assert_eq!(
+            nearest("const bool shadow1MinMagNearest = true;\n"),
+            [false, true]
+        );
+        assert_eq!(
+            nearest("const bool shadowtex0Nearest = false;\n"),
+            [false; 2]
+        );
     }
 
     #[test]
     fn no_directive_and_conflicts() {
         let pp = stage("void main() {}\n");
         assert_eq!(draw_buffers(&pp), None);
-        let a =
-            stage("/* const int colortex1Format = RGB8; */\nconst bool colortex1Clear = maybe;\n");
-        let b =
-            stage("/* const int colortex1Format = RGBA16; const int colortex2Format = XYZ; */\n");
+        let a = stage(
+            "/*\nconst int colortex1Format = RGB8;\n*/\nconst bool colortex1Clear = maybe;\n",
+        );
+        let b = stage(
+            "/*\nconst int colortex1Format = RGBA16;\nconst int colortex2Format = XYZ;\n*/\n",
+        );
         let mut config = Config::default();
         config.read(&a);
         config.read(&b);
         let notes = config.notes.join("\n");
         assert!(
-            notes.contains("composite.fsh:2: `colortex1Clear` is not a bool"),
+            notes.contains("composite.fsh:4: `colortex1Clear` is not a bool"),
             "{notes}"
         );
         assert!(
@@ -654,9 +652,34 @@ mod tests {
             "{notes}"
         );
         assert!(notes.contains("unknown format `XYZ`"), "{notes}");
+        assert_eq!(config.buffers[1].format, Format::parse("RGBA16").unwrap());
+    }
+
+    #[test]
+    fn a_format_in_a_comment_counts_where_const_starts_its_line() {
+        // The placements of probe packs p9063a and p9063c (ours): Iris 1.11.7 kept RGBA8 for
+        // buffers 1, 2, 5 and 6, and took RGBA16F for 3, 4 and 7 to 11.
+        let pp = stage(
+            "/*\n * const int colortex1Format = RGBA16F;\n */\n\
+             /* const int colortex2Format = RGBA16F; */\n\
+             /*\nconst int colortex3Format = RGBA16F;\n    const int colortex4Format = RGBA16F;\n\
+             const int colortex16Dummy = 1; const int colortex5Format = RGBA16F;\n*/\n\
+             /* const int colortex6Format = RGBA16F;\n*/\n\
+             /*\nconst int colortex7Format = RGBA16F; */\n\
+             /*\nconst int colortex8Format = RGBA16F; trailing words\n\
+             \tconst int colortex9Format = RGBA16F;\n\
+             const  int  colortex10Format  =  RGBA16F ;\n\
+             const int colortex11Format = RGBA16F; const int colortex16Dummy = 1;\n*/\n",
+        );
+        let mut config = Config::default();
+        config.read(&pp);
+        let half = Format::parse("RGBA16F").unwrap();
+        let read: Vec<bool> = (1..=11).map(|n| config.buffers[n].format == half).collect();
         assert_eq!(
-            config.finish().buffers[1].format,
-            Format::parse("RGBA16").unwrap()
+            read,
+            [
+                false, false, true, true, false, false, true, true, true, true, true
+            ]
         );
     }
 }

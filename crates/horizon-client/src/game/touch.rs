@@ -2,7 +2,7 @@
 //! as the mouse over every screen. The layout and the fingers' state are the lib's `touch`; this file acts on
 //! what they say the way the keyboard and mouse would: the D-pad and buttons are their default keys, a tap is
 //! a click, holding still is a held left button, and a drag turns the view as the mouse does.
-use super::{Game, Screen};
+use super::{Game, Screen, event_loop::EventLoopCtl};
 use horizon_client::{
     Result,
     hud::HudBatch,
@@ -16,7 +16,6 @@ use winit::{
         DeviceId, ElementState, KeyEvent, MouseButton, MouseScrollDelta, Touch, TouchPhase,
         WindowEvent,
     },
-    event_loop::ActiveEventLoop,
     keyboard::KeyCode,
 };
 
@@ -156,14 +155,14 @@ impl Game<'_> {
         )
     }
 
-    pub(super) fn touch_keyboard_used(&mut self, event_loop: &ActiveEventLoop) {
+    pub(super) fn touch_keyboard_used(&mut self, event_loop: &dyn EventLoopCtl) {
         self.touch_release_menu(event_loop);
         if horizon_gamecontroller::keyboard_connected() {
             self.touch.hardware.keyboard();
         }
     }
 
-    pub(super) fn touch_mouse_used(&mut self, event_loop: &ActiveEventLoop) {
+    pub(super) fn touch_mouse_used(&mut self, event_loop: &dyn EventLoopCtl) {
         self.touch_release_menu(event_loop);
         self.touch.hardware.mouse();
     }
@@ -178,7 +177,7 @@ impl Game<'_> {
     }
 
     /// winit's `WindowEvent::Touch`.
-    pub(super) fn touch_event(&mut self, event_loop: &ActiveEventLoop, touch: Touch) -> Result<()> {
+    pub(super) fn touch_event(&mut self, event_loop: &dyn EventLoopCtl, touch: Touch) -> Result<()> {
         self.touch.seen = true;
         self.touch.hardware.touch();
         self.last_input = Instant::now();
@@ -226,7 +225,7 @@ impl Game<'_> {
 
     /// Once a frame: a held finger starts mining, held-back clicks release, and a screen that opened over the
     /// game lets go of every finger on it.
-    pub(super) fn touch_frame(&mut self, event_loop: &ActiveEventLoop) {
+    pub(super) fn touch_frame(&mut self, event_loop: &dyn EventLoopCtl) {
         self.touch.hardware.refresh(
             horizon_gamecontroller::keyboard_connected(),
             horizon_gamecontroller::mouse_connected(),
@@ -305,7 +304,7 @@ impl Game<'_> {
             .is_some_and(|info| info.consumable.is_some())
     }
 
-    fn touch_act(&mut self, event_loop: &ActiveEventLoop, out: Vec<Out>, scale: f32) -> Result<()> {
+    fn touch_act(&mut self, event_loop: &dyn EventLoopCtl, out: Vec<Out>, scale: f32) -> Result<()> {
         for o in out {
             match o {
                 Out::Press(Control::Hotbar(slot)) => self.selected = usize::from(slot),
@@ -313,11 +312,11 @@ impl Game<'_> {
                     // A toggle either way: the crouch option toggles a press, otherwise flip the held key
                     // (as a controller's stick click does).
                     if self.settings.toggle_crouch {
-                        self.mapped_key(KeyCode::ShiftLeft, true, false)?;
-                        self.mapped_key(KeyCode::ShiftLeft, false, false)?;
+                        self.mapped_key(KeyCode::ShiftLeft, true, false, KeyCode::ShiftLeft)?;
+                        self.mapped_key(KeyCode::ShiftLeft, false, false, KeyCode::ShiftLeft)?;
                     } else {
                         let sneaking = self.keys.contains(&KeyCode::ShiftLeft);
-                        self.mapped_key(KeyCode::ShiftLeft, !sneaking, false)?;
+                        self.mapped_key(KeyCode::ShiftLeft, !sneaking, false, KeyCode::ShiftLeft)?;
                     }
                 }
                 Out::Press(Control::HideHud) => {
@@ -331,7 +330,7 @@ impl Game<'_> {
                         }
                         _ => {
                             if let Some(key) = key_of(control) {
-                                self.mapped_key(key, pressed, false)?;
+                                self.mapped_key(key, pressed, false, key)?;
                             }
                         }
                     }
@@ -387,7 +386,7 @@ impl Game<'_> {
     /// A toggle button holds them down until its next tap.
     fn touch_custom_key(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn EventLoopCtl,
         id: u16,
         pressed: bool,
     ) -> Result<()> {
@@ -417,7 +416,7 @@ impl Game<'_> {
     }
 
     /// Lets go of everything `id` pressed, in the reverse of the order it went down.
-    fn touch_release_custom(&mut self, event_loop: &ActiveEventLoop, id: u16) -> Result<()> {
+    fn touch_release_custom(&mut self, event_loop: &dyn EventLoopCtl, id: u16) -> Result<()> {
         let Some(keys) = self.touch.custom_keys.remove(&id) else {
             return Ok(());
         };
@@ -428,7 +427,7 @@ impl Game<'_> {
     }
 
     /// Every toggle button lets go: a screen opened over the game, or the player left it.
-    fn touch_release_toggles(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn touch_release_toggles(&mut self, event_loop: &dyn EventLoopCtl) -> Result<()> {
         let ids: Vec<u16> = std::mem::take(&mut self.touch.toggled)
             .into_iter()
             .collect();
@@ -440,7 +439,7 @@ impl Game<'_> {
 
     /// Buttons that no longer exist (deleted, or cleared by Reset Layout) let go of their keys, so a
     /// deletion never leaves a key stuck down.
-    fn touch_release_removed(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    fn touch_release_removed(&mut self, event_loop: &dyn EventLoopCtl) -> Result<()> {
         let missing = |id: &u16| self.settings.touch.button(*id).is_none();
         if !self.touch.custom_keys.keys().any(missing) && !self.touch.toggled.iter().any(missing) {
             return Ok(());
@@ -462,7 +461,7 @@ impl Game<'_> {
 
     fn touch_custom_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn EventLoopCtl,
         key: touch::CustomKey,
         state: ElementState,
     ) -> Result<()> {
@@ -482,14 +481,14 @@ impl Game<'_> {
     /// A keyboard event the player's button stands for, through the same path as a real key.
     fn synthetic_key(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn EventLoopCtl,
         key: KeyCode,
         state: ElementState,
     ) -> Result<()> {
         let Some(id) = self.window.as_ref().map(|w| w.id()) else {
             return Ok(());
         };
-        self.window_event(
+        self.handle_window_event(
             event_loop,
             id,
             WindowEvent::KeyboardInput {
@@ -497,6 +496,7 @@ impl Game<'_> {
                 event: KeyEvent::synthetic(key, state),
                 is_synthetic: true,
             },
+        super::input_trace::InputOrigin::User,
         );
         Ok(())
     }
@@ -518,7 +518,7 @@ impl Game<'_> {
 
     fn touch_menu(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn EventLoopCtl,
         id: u64,
         phase: TouchPhase,
         at: (f32, f32),
@@ -601,7 +601,7 @@ impl Game<'_> {
 
     /// Abandon a menu gesture when another input device or the world takes over.
     /// A missing UIKit end event must neither latch all later fingers nor create a click.
-    fn touch_release_menu(&mut self, event_loop: &ActiveEventLoop) {
+    fn touch_release_menu(&mut self, event_loop: &dyn EventLoopCtl) {
         if let Some(finger) = self.touch.menu.take()
             && finger.pressed
             && !finger.closed
@@ -611,7 +611,7 @@ impl Game<'_> {
     }
 
     /// Advance the delayed menu press/release after drawing the pointer.
-    fn touch_menu_frame(&mut self, event_loop: &ActiveEventLoop) {
+    fn touch_menu_frame(&mut self, event_loop: &dyn EventLoopCtl) {
         let Some(finger) = self.touch.menu.as_mut() else {
             return;
         };
@@ -631,7 +631,7 @@ impl Game<'_> {
         }
     }
 
-    fn touch_pointer(&mut self, event_loop: &ActiveEventLoop, at: (f32, f32)) {
+    fn touch_pointer(&mut self, event_loop: &dyn EventLoopCtl, at: (f32, f32)) {
         let (Some(id), Some(batch)) = (self.window.as_ref().map(|w| w.id()), self.screen_batch())
         else {
             return;
@@ -639,17 +639,18 @@ impl Game<'_> {
         let at = self.screen_point(at);
         let position =
             PhysicalPosition::new(f64::from(at.0 * batch.scale), f64::from(at.1 * batch.scale));
-        self.window_event(
+        self.handle_window_event(
             event_loop,
             id,
             WindowEvent::CursorMoved {
                 device_id: DeviceId::dummy(),
                 position,
             },
+        super::input_trace::InputOrigin::User,
         );
     }
 
-    fn touch_button(&mut self, event_loop: &ActiveEventLoop, pressed: bool) {
+    fn touch_button(&mut self, event_loop: &dyn EventLoopCtl, pressed: bool) {
         let Some(id) = self.window.as_ref().map(|w| w.id()) else {
             return;
         };
@@ -658,7 +659,7 @@ impl Game<'_> {
         } else {
             ElementState::Released
         };
-        self.window_event(
+        self.handle_window_event(
             event_loop,
             id,
             WindowEvent::MouseInput {
@@ -666,14 +667,15 @@ impl Game<'_> {
                 state,
                 button: MouseButton::Left,
             },
+        super::input_trace::InputOrigin::User,
         );
     }
 
-    fn touch_wheel(&mut self, event_loop: &ActiveEventLoop, lines: f32) {
+    fn touch_wheel(&mut self, event_loop: &dyn EventLoopCtl, lines: f32) {
         let Some(id) = self.window.as_ref().map(|w| w.id()) else {
             return;
         };
-        self.window_event(
+        self.handle_window_event(
             event_loop,
             id,
             WindowEvent::MouseWheel {
@@ -681,6 +683,7 @@ impl Game<'_> {
                 delta: MouseScrollDelta::LineDelta(0.0, lines),
                 phase: TouchPhase::Moved,
             },
+        super::input_trace::InputOrigin::User,
         );
     }
 

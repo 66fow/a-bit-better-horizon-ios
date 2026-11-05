@@ -222,7 +222,7 @@ impl Pack {
         // `name_for_index` borrows the archive, so the list is finished before anything is read out.
         let mut names: Vec<String> = (0..archive.len())
             .filter_map(|index| {
-                let name = archive.name_for_index(index)?.replace('\\', "/");
+                let name = archive.name_for_index(index)?.ok()?.replace('\\', "/");
                 (!name.ends_with('/') && !is_junk(&name)).then_some(name)
             })
             .collect();
@@ -288,7 +288,7 @@ impl Pack {
         let mut written = 0u64;
         for index in 0..self.archive.len() {
             let file = self.archive.by_index(index)?;
-            let name = file.name().replace('\\', "/");
+            let name = file.name()?.replace('\\', "/");
             let failure = |message: String| {
                 let _ = fs::remove_dir_all(into);
                 Err::<(usize, u64), _>(message.into())

@@ -17,12 +17,11 @@ pub enum Signature {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Textures {
     pub skin: Option<String>,
+    /// The skin's `metadata.model` is `slim` (`PlayerModelType.SLIM`).
+    pub slim: bool,
     pub cape: Option<String>,
     pub elytra: Option<String>,
     pub signed: bool,
-    /// The skin's `metadata.model` is `slim` (`PlayerSkin.Model.SLIM`, the
-    /// three-pixel arms); any other value or none is wide.
-    pub slim: bool,
 }
 
 /// The `getTexture` endpoint's valid URIs from Minecraft services discovery.
@@ -98,6 +97,50 @@ pub fn profile_skin_url(profile: &serde_json::Value) -> Option<String> {
     let (value, signature) = parse_profile(profile).textures?;
     unpack(&value, signature, &TEXTURE_URIS).skin
 }
+
+/// The textures of a Minecraft services `/minecraft/profile` answer: the
+/// `ACTIVE` skin and cape (`MinecraftProfileResponse`). Unsigned, like the
+/// local player's own textures, and only URLs under the allowed domains count.
+pub fn services_profile_textures(profile: &serde_json::Value) -> Textures {
+    let active = |key: &str| {
+        profile
+            .get(key)?
+            .as_array()?
+            .iter()
+            .find(|t| t.get("state").and_then(|s| s.as_str()) == Some("ACTIVE"))
+    };
+    let skin_entry = active("skins");
+    let skin = skin_entry
+        .and_then(|t| t.get("url"))
+        .and_then(|u| u.as_str())
+        .filter(|url| {
+            TEXTURE_URIS
+                .iter()
+                .any(|u| url.starts_with(&u.replace("{textureId}", "")))
+        })
+        .map(str::to_owned);
+    let slim = skin_entry
+        .and_then(|t| t.get("variant"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|v| v.eq_ignore_ascii_case("slim"));
+    let cape = active("capes")
+        .and_then(|t| t.get("url"))
+        .and_then(|u| u.as_str())
+        .filter(|url| {
+            TEXTURE_URIS
+                .iter()
+                .any(|u| url.starts_with(&u.replace("{textureId}", "")))
+        })
+        .map(str::to_owned);
+    Textures {
+        skin,
+        slim,
+        cape,
+        elytra: None,
+        signed: false,
+    }
+}
+
 /// `profile_skin_url` on a block entity's `profile` NBT (`SkullBlockEntity`):
 /// the same `properties` list, held as a compound. A name-only profile (a
 /// string tag) has no properties and no skin URL.
@@ -113,6 +156,12 @@ pub fn profile_skin_url_nbt(profile: &horizon_world::nbt::Tag) -> Option<String>
             .flatten()
     })?;
     unpack(&value, Signature::Unsigned, &TEXTURE_URIS).skin
+}
+
+/// `ResolvableProfile.skinPatch().body()` of a skull's `profile` NBT: the
+/// `texture` id that replaces its skin.
+pub fn profile_texture_nbt(profile: &horizon_world::nbt::Tag) -> Option<String> {
+    nbt_text(profile.get("texture"))
 }
 
 /// The profile's uuid as u128: `id` as an int array (block entity NBT) or a
@@ -424,6 +473,11 @@ pub fn head_skin(
     downloads: &mut Downloader,
     atlas: impl Fn(&str) -> bool,
 ) -> String {
+    if let Some(texture) = profile.get("texture").and_then(|t| t.as_str())
+        && let Some(sprite) = patch_skin(texture, downloads, &atlas)
+    {
+        return sprite;
+    }
     let p = parse_profile(profile);
     let property = p.textures.or_else(|| {
         let key = p.dynamic.as_ref()?;
@@ -452,6 +506,68 @@ pub fn head_skin(
     crate::tab_list::default_skin(p.id).to_owned()
 }
 
+/// `PlayerSkin.Patch.apply` for a head: the sprite of a profile's `texture`
+/// override (`ClientAsset.ResourceTexture`, a resource pack's
+/// `<namespace>:textures/<path>.png`), which replaces the downloaded or
+/// default skin. Vanilla textures are in the atlas already; another
+/// namespace's loads into a skin slot, and `None` answers until it is there
+/// (or when the packs lack it).
+pub fn patch_skin(
+    texture: &str,
+    downloads: &mut Downloader,
+    atlas: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let (namespace, path) = texture.split_once(':').unwrap_or(("minecraft", texture));
+    if !valid_texture_id(namespace, path) {
+        return None;
+    }
+    if namespace == "minecraft" && atlas(path) {
+        return Some(path.to_owned());
+    }
+    let location = format!("patch/{namespace}/{path}");
+    if atlas(&location) {
+        downloads.drawn(&location);
+        return Some(location);
+    }
+    downloads.resource(&location, namespace, path);
+    None
+}
+
+/// `Identifier`'s characters (`isValidNamespace`, `isValidPath`), and no
+/// `.`, `..` or empty segment (`FileUtil.decomposePath`, as the packs read
+/// it): a server's `texture` never names a file outside the packs.
+fn valid_texture_id(namespace: &str, path: &str) -> bool {
+    let segment = |s: &str| !s.is_empty() && s != "." && s != "..";
+    !namespace.is_empty()
+        && namespace
+            .chars()
+            .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-' | '.'))
+        && path
+            .chars()
+            .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '_' | '-' | '.' | '/'))
+        && segment(namespace)
+        && path.split('/').all(segment)
+}
+
+/// A `width`x`height` RGBA image as the 64x64 skin it maps onto: each texel
+/// the nearest of the image's at the same normalised UV.
+fn resample_64(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return None;
+    }
+    let mut out = vec![0u8; 64 * 64 * 4];
+    for y in 0..64 {
+        for x in 0..64 {
+            let (sx, sy) = (x * w / 64, y * h / 64);
+            let s = (sy * w + sx) * 4;
+            let d = (y * 64 + x) * 4;
+            out[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+        }
+    }
+    Some(out)
+}
+
 /// `MinecraftProfileTexture.getHash`: the base name of the URL's path.
 pub fn texture_hash(url: &str) -> Option<String> {
     let rest = url.split_once("://")?.1;
@@ -466,16 +582,14 @@ pub fn texture_hash(url: &str) -> Option<String> {
 pub fn skin_location(hash: &str) -> String {
     location("skins/", hash)
 }
-
-/// The cape's texture id, as [`skin_location`] in `capes/`.
+/// `registerTexture` in the cape cache: `capes/` and the same SHA-1.
 pub fn cape_location(hash: &str) -> String {
     location("capes/", hash)
 }
-
-fn location(folder: &str, hash: &str) -> String {
+fn location(prefix: &str, hash: &str) -> String {
     let units: Vec<u8> = hash.encode_utf16().flat_map(u16::to_le_bytes).collect();
     let digest = sha1(&units);
-    let mut out = String::from(folder);
+    let mut out = String::from(prefix);
     for b in digest {
         out.push_str(&format!("{b:02x}"));
     }
@@ -685,17 +799,32 @@ pub struct Downloader {
     ready: Vec<(String, Vec<u8>)>,
     /// Locations already in `ready`, so `again` does not double-queue.
     queued: std::collections::HashSet<String>,
-    /// Decoded skin and cape images by location, kept so a skin evicted from the
+    /// Decoded skin images by location, kept so a skin evicted from the
     /// atlas uploads again (`again`); the disk cache backs anything dropped.
     images: std::collections::HashMap<String, Vec<u8>>,
     image_order: std::collections::VecDeque<String>,
     /// Skins and capes drawn from the atlas since `take_drawn`.
     drawn: std::collections::HashSet<String>,
+    /// The resource packs' root, where a profile's `texture` patch is read.
+    resource_root: std::path::PathBuf,
+    /// How each `patch/` texture of the resource packs loaded, by location.
+    resources: std::collections::HashMap<String, Download>,
 }
 /// `images` is bounded only so a long session on a busy server does not grow
 /// without end; the disk cache holds everything it drops.
 const MAX_SKIN_IMAGES: usize = 1024;
 impl Downloader {
+    /// The decoded 64×64 RGBA image an atlas location holds, when it is
+    /// still in memory (3D skin layers builds its geometry from it, and the
+    /// disk cache backs whatever was dropped).
+    pub fn image(&self, location: &str) -> Option<&[u8]> {
+        self.images.get(location).map(Vec::as_slice)
+    }
+    /// Keeps a decoded image under `location` for the images read back later
+    /// (a launcher's offline skin, which skips `queue`).
+    pub fn remember_image(&mut self, location: &str, rgba: &[u8]) {
+        self.remember(location.to_owned(), rgba.to_vec());
+    }
     pub fn new(root: std::path::PathBuf) -> Self {
         let (send, done) = std::sync::mpsc::channel();
         Self {
@@ -708,7 +837,47 @@ impl Downloader {
             images: Default::default(),
             image_order: Default::default(),
             drawn: Default::default(),
+            resource_root: Default::default(),
+            resources: Default::default(),
         }
+    }
+    /// The resource packs changed (or were first loaded) at `root`: patch
+    /// textures load again from there.
+    pub fn set_resource_root(&mut self, root: std::path::PathBuf) {
+        for location in std::mem::take(&mut self.resources).into_keys() {
+            self.images.remove(&location);
+            self.image_order.retain(|l| *l != location);
+        }
+        self.resource_root = root;
+    }
+    /// `ClientAsset.ResourceTexture`: loads `<namespace>:textures/<path>.png`
+    /// from the resource packs into a skin slot as `location`, once. A
+    /// texture of another size is sampled as the model's normalised UVs would
+    /// sample it (nearest texel) into the 64x64 slot.
+    fn resource(&mut self, location: &str, namespace: &str, path: &str) {
+        match self.resources.get(location) {
+            Some(Download::Failed) => return,
+            Some(_) => {
+                self.again(location);
+                return;
+            }
+            None => {}
+        }
+        let file = self
+            .resource_root
+            .join(format!("assets/{namespace}/textures/{path}.png"));
+        let image = std::fs::read(file)
+            .ok()
+            .and_then(|b| crate::hud::decode_bytes(&b).ok())
+            .and_then(|(w, h, rgba)| resample_64(w, h, &rgba));
+        let state = match image {
+            Some(rgba) => {
+                self.queue(location.to_owned(), rgba);
+                Download::Ready
+            }
+            None => Download::Failed,
+        };
+        self.resources.insert(location.to_owned(), state);
     }
     /// How the download of `url` stands, starting it the first time.
     pub fn state(&mut self, kind: Kind, url: &str) -> Download {
@@ -741,12 +910,24 @@ impl Downloader {
             .join(&digest);
         let (url, send) = (url.to_owned(), self.send.clone());
         std::thread::spawn(move || {
-            let image = cached_texture(&file, kind, || http_get(&url));
+            let bytes = std::fs::read(&file).ok().or_else(|| {
+                let body = http_get(&url)?;
+                let _ = std::fs::create_dir_all(file.parent()?);
+                let _ = std::fs::write(&file, &body);
+                Some(body)
+            });
+            let image = bytes
+                .and_then(|b| crate::hud::decode_bytes(&b).ok())
+                .and_then(|(w, h, rgba)| match kind {
+                    Kind::Skin => process_legacy_skin(w, h, &rgba),
+                    Kind::Cape => process_cape(w, h, &rgba),
+                    Kind::Elytra => Some(rgba),
+                });
             let _ = send.send((key, image));
         });
         Download::Pending
     }
-    /// Keeps a decoded texture for `again`, dropping the oldest past the bound.
+    /// Keeps a decoded skin for `again`, dropping the oldest past the bound.
     fn remember(&mut self, location: String, rgba: Vec<u8>) {
         if !self.images.contains_key(&location) {
             self.image_order.push_back(location.clone());
@@ -765,25 +946,36 @@ impl Downloader {
         self.queued.insert(location.clone());
         self.ready.push((location, rgba));
     }
-    /// A ready skin or cape whose atlas slot was evicted (`show_skin` answered no):
+    /// A ready skin whose atlas slot was evicted (`show_skin` answered no):
     /// its image for upload again, from memory or the disk cache.
     pub fn again(&mut self, location: &str) -> bool {
         if self.queued.contains(location) {
             return true;
         }
-        let (kind, digest) = if let Some(digest) = location.strip_prefix("skins/") {
-            (Kind::Skin, digest)
-        } else if let Some(digest) = location.strip_prefix("capes/") {
-            (Kind::Cape, digest)
-        } else {
-            return false;
-        };
+        if location.starts_with("patch/") {
+            let Some(image) = self.images.get(location).cloned() else {
+                // Dropped from memory: read from the packs again.
+                self.resources.remove(location);
+                return false;
+            };
+            self.queue(location.to_owned(), image);
+            return true;
+        }
+        let (digest, process): (_, fn(u32, u32, &[u8]) -> Option<Vec<u8>>) =
+            if let Some(digest) = location.strip_prefix("skins/") {
+                (digest, process_legacy_skin)
+            } else if let Some(digest) = location.strip_prefix("capes/") {
+                (digest, process_cape)
+            } else {
+                return false;
+            };
         let image = self.images.get(location).cloned().or_else(|| {
             let file = self
                 .root
                 .join(if digest.len() > 2 { &digest[..2] } else { "xx" })
                 .join(digest);
-            cached_texture(&file, kind, || None)
+            let (w, h, rgba) = crate::hud::decode_bytes(&std::fs::read(&file).ok()?).ok()?;
+            process(w, h, &rgba)
         });
         let Some(image) = image else {
             return false;
@@ -791,7 +983,7 @@ impl Downloader {
         self.queue(location.to_owned(), image);
         true
     }
-    /// Skins and capes that finished since the last call: texture id and 64x64 RGBA.
+    /// Skins that finished since the last call: texture id and 64x64 RGBA.
     pub fn take_ready(&mut self) -> Vec<(String, Vec<u8>)> {
         for (location, _) in &self.ready {
             self.queued.remove(location);
@@ -877,33 +1069,6 @@ impl SkinSlots {
     }
 }
 
-/// Decode before trusting or persisting a cached response: truncated PNGs and HTTP error bodies
-/// must not become a permanent default-skin result on subsequent launches.
-fn cached_texture(
-    file: &std::path::Path,
-    kind: Kind,
-    fetch: impl FnOnce() -> Option<Vec<u8>>,
-) -> Option<Vec<u8>> {
-    let decode = |bytes: &[u8]| {
-        let (w, h, rgba) = crate::hud::decode_bytes(bytes).ok()?;
-        match kind {
-            Kind::Skin => process_legacy_skin(w, h, &rgba),
-            Kind::Cape => process_cape(w, h, &rgba),
-            Kind::Elytra => Some(rgba),
-        }
-    };
-    if let Some(image) = std::fs::read(file).ok().and_then(|bytes| decode(&bytes)) {
-        return Some(image);
-    }
-    let bytes = fetch()?;
-    let image = decode(&bytes)?;
-    if let Some(parent) = file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-        let _ = std::fs::write(file, &bytes);
-    }
-    Some(image)
-}
-
 /// A GET over HTTP or HTTPS (textures.minecraft.net serves both; vanilla
 /// uses https): the body of a 2xx answer, 16 MiB at most, after redirects.
 fn http_get(url: &str) -> Option<Vec<u8>> {
@@ -925,131 +1090,6 @@ fn http_get(url: &str) -> Option<Vec<u8>> {
 }
 
 /// SHA-1 (FIPS 180-4).
-/// Ely.by's skin system: a skin from a player's name alone, with no account and no signature, so offline
-/// players (single player, LAN, offline-mode servers) wear the skin they chose there. Ely.by answers with its
-/// own skins, or Mojang's for a name it doesn't hold, and `204 No Content` for neither.
-pub const ELY_TEXTURES: &str = "https://skinsystem.ely.by/textures/";
-
-/// The textures of an Ely.by `textures/<name>` answer: `{"SKIN":{"url":…,"metadata":{"model":"slim"}},"CAPE":…}`.
-/// Counted as signed: the game asked Ely.by for them itself, so nobody else chose them.
-pub fn ely_textures(body: &str) -> Textures {
-    let mut out = Textures {
-        signed: true,
-        ..Textures::default()
-    };
-    let Ok(serde_json::Value::Object(json)) = serde_json::from_str::<serde_json::Value>(body)
-    else {
-        return Textures::default();
-    };
-    for (kind, texture) in json {
-        let Some(url) = texture.get("url").and_then(|u| u.as_str()) else {
-            continue;
-        };
-        // Ely.by names its own files over plain HTTP; the same address answers over HTTPS.
-        let url = match url.strip_prefix("http://ely.by/") {
-            Some(rest) => format!("https://ely.by/{rest}"),
-            None => url.to_owned(),
-        };
-        match kind.as_str() {
-            "SKIN" => {
-                out.slim = texture
-                    .get("metadata")
-                    .and_then(|m| m.get("model"))
-                    .and_then(|m| m.as_str())
-                    == Some("slim");
-                out.skin = Some(url);
-            }
-            "CAPE" => out.cape = Some(url),
-            _ => {}
-        }
-    }
-    out
-}
-
-/// The Mojang account `name`'s textures: its profile id, then the session server's signed profile. Counted
-/// as signed for the same reason as Ely.by's.
-fn mojang_textures(name: &str) -> Option<Textures> {
-    let parse = |body: Vec<u8>| serde_json::from_slice::<serde_json::Value>(&body).ok();
-    let id = parse(http_get(&format!("{MOJANG_NAMES}{name}"))?)?;
-    let profile = parse(http_get(&format!(
-        "{MOJANG_PROFILES}{}",
-        id.get("id")?.as_str()?
-    ))?)?;
-    mojang_profile_textures(&profile)
-}
-
-/// The textures of a session server profile (`{"properties":[{"name":"textures","value":…}]}`).
-fn mojang_profile_textures(profile: &serde_json::Value) -> Option<Textures> {
-    let value = profile
-        .get("properties")?
-        .as_array()?
-        .iter()
-        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("textures"))?
-        .get("value")?
-        .as_str()?;
-    Some(unpack(value, Signature::Signed, &TEXTURE_URIS)).filter(|t| t.skin.is_some())
-}
-
-const MOJANG_NAMES: &str = "https://api.mojang.com/users/profiles/minecraft/";
-const MOJANG_PROFILES: &str = "https://sessionserver.mojang.com/session/minecraft/profile/";
-
-/// Whether `name` is one Ely.by could hold, and safe to put in its URL as it is.
-fn ely_name(name: &str) -> bool {
-    (1..=32).contains(&name.len())
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-}
-
-/// The Ely.by lookups of one connection: each player asked once, on a thread of its own, and the textures
-/// found handed back by [`ElySkins::take`].
-pub struct ElySkins {
-    asked: std::collections::HashSet<u128>,
-    send: std::sync::mpsc::Sender<(u128, Textures)>,
-    done: std::sync::mpsc::Receiver<(u128, Textures)>,
-}
-
-impl Default for ElySkins {
-    fn default() -> Self {
-        let (send, done) = std::sync::mpsc::channel();
-        Self {
-            asked: Default::default(),
-            send,
-            done,
-        }
-    }
-}
-
-impl ElySkins {
-    /// Ask Ely.by for `name`'s skin, once per player.
-    pub fn ask(&mut self, uuid: u128, name: &str) {
-        if !ely_name(name) || !self.asked.insert(uuid) {
-            return;
-        }
-        let (url, send, name) = (
-            format!("{ELY_TEXTURES}{name}"),
-            self.send.clone(),
-            name.to_owned(),
-        );
-        let _ = std::thread::Builder::new()
-            .name("horizon-ely-skin".into())
-            .spawn(move || {
-                let ely = http_get(&url)
-                    .map(|body| ely_textures(&String::from_utf8_lossy(&body)))
-                    .filter(|t| t.skin.is_some());
-                // Ely.by answers 204 for many Mojang accounts (jeb_, Technoblade): ask Mojang then.
-                if let Some(textures) = ely.or_else(|| mojang_textures(&name)) {
-                    let _ = send.send((uuid, textures));
-                }
-            });
-    }
-
-    /// The skins found since the last call.
-    pub fn take(&mut self) -> Vec<(u128, Textures)> {
-        self.done.try_iter().collect()
-    }
-}
-
 pub fn sha1(data: &[u8]) -> [u8; 20] {
     use sha1::{Digest, Sha1};
     Sha1::digest(data).into()
@@ -1057,6 +1097,21 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 
 #[cfg(test)]
 mod tests {
+    /// A profile's `texture` names a pack texture, never a file outside the
+    /// packs: bad characters and `..` segments draw nothing.
+    #[test]
+    fn a_texture_patch_stays_inside_the_packs() {
+        use super::valid_texture_id;
+        assert!(valid_texture_id("ethereal", "entity/plush_blank"));
+        assert!(valid_texture_id("minecraft", "entity/player/wide/steve"));
+        assert!(!valid_texture_id("ethereal", "../../../secret"));
+        assert!(!valid_texture_id("..", "entity/x"));
+        assert!(!valid_texture_id("ethereal", "entity//x"));
+        assert!(!valid_texture_id("Ethereal", "entity/x"));
+        assert!(!valid_texture_id("ethereal", "entity\\x"));
+        assert!(!valid_texture_id("", "entity/x"));
+    }
+
     /// A pack reload swaps the atlas: its skin slots are blank, so a forgotten
     /// table holds nothing and hands out slots from the start again, even for
     /// skins drawn in the last frame.
@@ -1174,6 +1229,36 @@ mod tests {
         assert_eq!(p.dynamic, Some(NameOrId::Name("Notch".into())));
     }
 
+    #[test]
+    fn services_profile_answers_give_the_active_skin_and_cape() {
+        let profile = serde_json::json!({
+            "skins": [
+                {"state": "INACTIVE", "url": "https://textures.minecraft.net/texture/old"},
+                {"state": "ACTIVE", "url": "https://textures.minecraft.net/texture/skin1", "variant": "CLASSIC"}
+            ],
+            "capes": [{"state": "ACTIVE", "url": "http://textures.minecraft.net/texture/cape1"}]
+        });
+        let t = super::services_profile_textures(&profile);
+        assert_eq!(
+            t.skin.as_deref(),
+            Some("https://textures.minecraft.net/texture/skin1")
+        );
+        assert_eq!(
+            t.cape.as_deref(),
+            Some("http://textures.minecraft.net/texture/cape1")
+        );
+        assert!(!t.signed);
+        let elsewhere = serde_json::json!({"skins": [{"state": "ACTIVE", "url": "https://evil.example/texture/x"}]});
+        assert_eq!(
+            super::services_profile_textures(&elsewhere),
+            super::Textures::default()
+        );
+        assert_eq!(
+            super::services_profile_textures(&serde_json::json!({})),
+            super::Textures::default()
+        );
+    }
+
     /// `getByName` and `getProfileById` answer from the services the
     /// discovery document names; a profile resolves through both.
     #[test]
@@ -1229,49 +1314,6 @@ mod tests {
             "session": {"endpoints": {"getProfileById": {"uri": format!("{base}/session/minecraft/profile/{{profileId}}")}}},
         }});
         assert!(super::resolve_profile(&super::NameOrId::Name("Notch".into()), &doc).is_none());
-    }
-
-    #[test]
-    fn corrupt_skin_cache_is_refetched_and_invalid_downloads_are_not_saved() {
-        let root = std::env::temp_dir().join(format!(
-            "skin-cache-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let file = root.join("skin");
-        std::fs::write(&file, b"broken PNG").unwrap();
-        let mut png_bytes = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut png_bytes, 64, 64);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder
-                .write_header()
-                .unwrap()
-                .write_image_data(&vec![255; 64 * 64 * 4])
-                .unwrap();
-        }
-        assert!(
-            super::cached_texture(&file, super::Kind::Skin, || Some(png_bytes.clone())).is_some()
-        );
-        assert_eq!(std::fs::read(&file).unwrap(), png_bytes);
-        assert!(
-            super::cached_texture(&file, super::Kind::Skin, || panic!(
-                "valid cache must not fetch"
-            ))
-            .is_some()
-        );
-        let missing = root.join("missing");
-        assert!(
-            super::cached_texture(&missing, super::Kind::Skin, || Some(b"HTTP error".to_vec()))
-                .is_none()
-        );
-        assert!(!missing.exists());
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// More skins drawn every frame than there are slots (#3829): a frame's
@@ -1354,71 +1396,6 @@ mod tests {
         assert_eq!(d.take_ready(), vec![("skins/def".to_owned(), vec![4])]);
     }
 
-    /// Capes share the atlas with skins and must survive both atlas and decoded-image eviction.
-    #[test]
-    fn evicted_capes_upload_again_from_memory_and_disk() {
-        let root = std::env::temp_dir().join(format!(
-            "cape-cache-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut d = super::Downloader::new(root.clone());
-        let location = super::cape_location("test-cape");
-        let digest = location.strip_prefix("capes/").unwrap();
-        let file = root.join(&digest[..2]).join(digest);
-        let rgba = vec![7; 64 * 32 * 4];
-        let mut png_bytes = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut png_bytes, 64, 32);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder
-                .write_header()
-                .unwrap()
-                .write_image_data(&rgba)
-                .unwrap();
-        }
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, b"broken PNG").unwrap();
-        let image = super::cached_texture(&file, super::Kind::Cape, || Some(png_bytes))
-            .expect("corrupt cached cape should refetch");
-        assert_eq!(image.len(), 64 * 64 * 4);
-        assert_eq!(&image[..rgba.len()], &rgba);
-        assert!(image[rgba.len()..].iter().all(|&b| b == 0));
-        d.send
-            .send(((super::Kind::Cape, "test-cape".into()), Some(image.clone())))
-            .unwrap();
-        assert_eq!(
-            d.state(
-                super::Kind::Cape,
-                "https://textures.minecraft.net/texture/test-cape"
-            ),
-            super::Download::Ready
-        );
-        assert!(d.again(&location));
-        assert_eq!(d.take_ready(), vec![(location.clone(), image.clone())]);
-        assert!(d.again(&location));
-        assert!(d.again(&location));
-        assert_eq!(d.take_ready(), vec![(location.clone(), image.clone())]);
-        d.images.clear();
-        d.image_order.clear();
-        assert!(d.again(&location));
-        assert_eq!(d.take_ready(), vec![(location, image)]);
-        // An invalid response must never be saved as a cape.
-        let invalid = root.join("invalid");
-        assert!(
-            super::cached_texture(&invalid, super::Kind::Cape, || Some(
-                b"invalid PNG".to_vec()
-            ))
-            .is_none()
-        );
-        assert!(!invalid.exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     /// A cape fills the top half of a 64x64 slot; a larger one is scaled to 64x32.
     #[test]
     fn capes_fill_the_top_half_of_a_slot() {
@@ -1490,24 +1467,6 @@ mod tests {
 
     use super::*;
 
-    /// The skin's metadata names its model: `slim` is Alex's arms, anything
-    /// else (or no metadata, as most wide skins send) is Steve's.
-    #[test]
-    fn skin_metadata_names_the_slim_model() {
-        let slim = unpack(
-            "eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHBzOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2FiYyIsIm1ldGFkYXRhIjp7Im1vZGVsIjoic2xpbSJ9fX19",
-            Signature::Signed,
-            &TEXTURE_URIS,
-        );
-        assert!(slim.slim);
-        assert_eq!(
-            slim.skin.as_deref(),
-            Some("https://textures.minecraft.net/texture/abc")
-        );
-        assert!(!unpack("eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHBzOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2FiYyJ9fX0=", Signature::Signed, &TEXTURE_URIS).slim);
-        assert!(!unpack("eyJ0ZXh0dXJlcyI6eyJTS0lOIjp7InVybCI6Imh0dHBzOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2FiYyIsIm1ldGFkYXRhIjp7Im1vZGVsIjoiZGVmYXVsdCJ9fX19", Signature::Signed, &TEXTURE_URIS).slim);
-    }
-
     #[test]
     fn skull_block_entity_profiles_supply_head_skins() {
         let value = "eyJ0ZXh0dXJlcyI6IHsiU0tJTiI6IHsidXJsIjogImh0dHBzOi8vdGV4dHVyZXMubWluZWNyYWZ0Lm5ldC90ZXh0dXJlL2FiYzEyMyJ9fX0=";
@@ -1556,71 +1515,5 @@ mod tests {
             texture_hash("http://textures.minecraft.net/texture/abc.png?x=1").unwrap(),
             "abc"
         );
-    }
-
-    #[test]
-    fn mojang_profiles_become_textures() {
-        let payload = r#"{"textures":{"SKIN":{"url":"http://textures.minecraft.net/texture/ab"},"CAPE":{"url":"http://textures.minecraft.net/texture/cd"}}}"#;
-        let value: String = {
-            // base64 of the payload, by the standard alphabet.
-            const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            payload
-                .as_bytes()
-                .chunks(3)
-                .flat_map(|c| {
-                    let n =
-                        c.iter().fold(0u32, |a, &b| a << 8 | u32::from(b)) << (8 * (3 - c.len()));
-                    (0..4).map(move |i| {
-                        if i > c.len() {
-                            '='
-                        } else {
-                            A[(n >> (18 - 6 * i) & 63) as usize] as char
-                        }
-                    })
-                })
-                .collect()
-        };
-        let profile = serde_json::json!({"properties": [{"name": "textures", "value": value}]});
-        let t = super::mojang_profile_textures(&profile).unwrap();
-        assert!(t.signed);
-        assert_eq!(
-            t.cape.as_deref(),
-            Some("http://textures.minecraft.net/texture/cd")
-        );
-        assert!(super::mojang_profile_textures(&serde_json::json!({"properties": []})).is_none());
-        // A cape takes the top half of a skin slot; malformed pixels fail.
-        assert_eq!(
-            super::process_cape(64, 32, &[7; 64 * 32 * 4])
-                .unwrap()
-                .len(),
-            64 * 64 * 4
-        );
-        assert!(super::process_cape(22, 17, &[]).is_none());
-    }
-
-    #[test]
-    fn ely_answers_become_textures() {
-        let slim = super::ely_textures(
-            r#"{"SKIN":{"url":"http://ely.by/storage/skins/69c6.png","metadata":{"model":"slim"}},"CAPE":{"url":"http://ely.by/storage/capes/1.png"}}"#,
-        );
-        assert_eq!(
-            slim.skin.as_deref(),
-            Some("https://ely.by/storage/skins/69c6.png")
-        );
-        assert_eq!(
-            slim.cape.as_deref(),
-            Some("https://ely.by/storage/capes/1.png")
-        );
-        assert!(slim.slim && slim.signed);
-        let mojang =
-            super::ely_textures(r#"{"SKIN":{"url":"http://textures.minecraft.net/texture/2920"}}"#);
-        assert_eq!(
-            mojang.skin.as_deref(),
-            Some("http://textures.minecraft.net/texture/2920")
-        );
-        assert!(!mojang.slim);
-        // 204 No Content: nothing to wear.
-        assert_eq!(super::ely_textures(""), super::Textures::default());
-        assert!(super::ely_name("Steve_01") && !super::ely_name("a b") && !super::ely_name("../x"));
     }
 }

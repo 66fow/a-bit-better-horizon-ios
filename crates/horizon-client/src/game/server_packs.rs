@@ -314,6 +314,19 @@ impl Game<'_> {
         }
     }
 
+    /// Splitscreen: this player's answer for the server's packs, once it gave one (or its
+    /// server list entry did).
+    pub(super) fn pack_answer(&self) -> Option<bool> {
+        match self.server_packs.packs.prompt() {
+            Prompt::Allowed => Some(true),
+            Prompt::Declined => Some(false),
+            Prompt::Pending => None,
+        }
+    }
+    /// Splitscreen: this player is asked about a server's packs right now.
+    pub(super) fn pack_prompt_open(&self) -> bool {
+        self.server_packs.prompt.is_some()
+    }
     /// The prompt's answer (`PackConfirmScreen`'s callback): the server's
     /// setting follows it, declining a required pack disconnects, and every
     /// pack it asked about is pushed.
@@ -358,10 +371,11 @@ impl Game<'_> {
     pub(super) fn tick_server_packs(&mut self) {
         self.server_packs.notifiers.retain_mut(PackNotifier::poll);
         // A reload waits for the world's resources (`reload_packs`).
-        if self.rest_loader.is_some() || self.world_loader.is_some() {
+        if self.rest_loader.is_some() {
             return;
         }
         self.drive_pack_reload();
+        self.drive_pack_browser();
         // One reload at a time: the player's own waits under its overlay
         // before the server's packs can ask for theirs (`ServerPacks` keeps
         // its own reload from overlapping).
@@ -473,7 +487,11 @@ impl Game<'_> {
             );
         }
         ui::menu_background(batch, atlas, 0.0, 0.0, w, h, self.player.is_some());
-        let (_, _, [yes, no]) = prompt.texts();
+        let (title, message, [yes, no]) = prompt.texts();
+        // PackConfirmScreen is a ConfirmScreen.
+        horizon_client::widgets::begin_screen(|| {
+            super::screen_info::confirm("pack_prompt", &title.plain(), &message.plain())
+        });
         prompt
             .layout(atlas, (w, h))
             .draw(batch, atlas, self.cursor, [&yes, &no]);
@@ -541,6 +559,7 @@ impl Game<'_> {
                 toast.draw(&self.gui.atlas, batch, 32.0 * slot as f32);
             }
         }
+        self.draw_split_hud(batch, hidden);
     }
     /// A left click on the prompt: its answer when it hit a button.
     pub(super) fn pack_prompt_click(&mut self) -> Result<()> {

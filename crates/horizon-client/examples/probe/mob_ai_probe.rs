@@ -179,7 +179,7 @@ fn state(registry: &BlockRegistry, text: &str) -> BlockStateId {
     registry
         .resolve(&BlockState {
             name: name.to_owned(),
-            properties,
+            properties: properties.into(),
         })
         .unwrap_or_else(|e| panic!("{text}: {e}"))
 }
@@ -529,8 +529,12 @@ impl HiveHost for ProbeHive<'_, '_> {
     }
     fn load(&mut self, tag: &horizon_world::nbt::Tag) -> Option<Mob> {
         let index = self.first + self.added.len();
-        let mut m =
-            horizon_client::entity_nbt::mob_from_nbt(tag, self.types, 100_000 + index as u32)?;
+        let mut m = horizon_client::entity_nbt::mob_from_nbt(
+            tag,
+            self.types,
+            100_000 + index as u32,
+            None,
+        )?;
         if m.species() != Species::Bee {
             return None;
         }
@@ -748,6 +752,9 @@ fn print(out: &mut String, t: i32, i: usize, m: &Mob, player_down: bool, now: i6
         .or_else(|| horizon_client::mobs::animal_brain::describe(m));
     if let Some((acts, mem)) = brain {
         let _ = write!(out, "\tact {acts}\tmem {mem}");
+    }
+    if horizon_client::mobs::finalize::ageable(m.species()) {
+        let _ = write!(out, "\tage {}", m.extra.age);
     }
     if m.species() == Species::Villager {
         let _ = write!(out, "\tvx {}", villager(m));
@@ -1008,7 +1015,8 @@ pub fn main() -> horizon_client::Result<()> {
                 spec.yaw,
             );
             if spec.baby {
-                m.extra.age = -24000;
+                // AgeableMob.setBaby: the species' getBabyStartAge (a sniffer's is -48000).
+                m.extra.age = horizon_client::mobs::finalize::baby_start_age(m.species());
             }
             for flag in &spec.flags {
                 match flag.as_str() {
@@ -1018,10 +1026,11 @@ pub fn main() -> horizon_client::Result<()> {
                         m.persistent = true;
                     }
                     "ridden" => {
-                        m.extra.head = Some("minecraft:red_harness".into());
+                        m.extra.body = Some("minecraft:red_harness".into());
                         m.rider = Some(horizon_client::mobs::equine::Rider::default());
                     }
                     "noai" => m.no_ai = true,
+                    "agelocked" => m.extra.age_locked = true,
                     // Warden.finalizeSpawn's own part.
                     "digcooldown" | "emerge" => horizon_client::mobs::warden::finalize(
                         &mut m,
@@ -1137,6 +1146,7 @@ pub fn main() -> horizon_client::Result<()> {
                 sleeping: false,
                 sleep_timer: 0,
                 passenger: false,
+                riding_vehicle: None,
                 vehicle: None,
             }
         });
@@ -1165,11 +1175,14 @@ pub fn main() -> horizon_client::Result<()> {
                     collision: &collision,
                     data: &data,
                     player: player.clone(),
+                    controlling_player_movement: None,
                     nearest_player: player.as_ref().filter(|p| !p.spectator).map(|p| p.position),
                     others: $snapshot,
+                    dragon: None,
                     leash_boats: &[],
                     others_grid: $grid,
                     others_index: None,
+                    others_villagers: None,
                     daylight: (world.day_time.rem_euclid(24000)) < 12000,
                     monsters_burn: !(12542..23460).contains(&world.day_time.rem_euclid(24000)),
                     game_time: world.game_time,
@@ -1178,8 +1191,10 @@ pub fn main() -> horizon_client::Result<()> {
                     thundering: s.thunder,
                     nether: false,
                     block_tags: &items.block_tags,
+                    landing: &motion.landing,
                     biomes: &biomes,
                     mob_griefing: true,
+                    universal_anger: false,
                     mob_drops: true,
                     max_entity_cramming: 24,
                     difficulty: LocalDifficulty::new(s.difficulty, world.day_time, 0, 0.0),
@@ -1189,6 +1204,8 @@ pub fn main() -> horizon_client::Result<()> {
                     sea_level: -63,
                     items: Some(&items),
                     lid_openers: &lid_openers,
+                    mod_effects: None,
+                    border: None,
                 }
             };
         }
@@ -1309,7 +1326,7 @@ pub fn main() -> horizon_client::Result<()> {
                     continue;
                 }
                 if let Some(Some((name, volume, pitch))) =
-                    horizon_client::mobs::ai::feed_animal(&mut mobs[i], &mut level_random)
+                    horizon_client::mobs::ai::feed_animal(&mut mobs[i], &mut level_random, None)
                 {
                     events.push(MobEvent::Sound(name, [0.0; 3], volume, pitch));
                 }
@@ -1426,7 +1443,7 @@ pub fn main() -> horizon_client::Result<()> {
                     else {
                         continue;
                     };
-                    let tag = horizon_client::entity_nbt::mob_to_nbt(&mobs[i], [0; 4], None);
+                    let tag = horizon_client::entity_nbt::mob_to_nbt(&mobs[i], [0; 4], None, None);
                     let flower = horizon_client::mobs::bee::get(&mobs[i]).and_then(|b| b.flower);
                     let mut honey = Vec::new();
                     let stored = {

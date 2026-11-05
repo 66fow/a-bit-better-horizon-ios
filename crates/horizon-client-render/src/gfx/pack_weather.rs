@@ -40,11 +40,11 @@ pub fn inputs() -> horizon_shaders::GbuffersInputs {
             .collect(),
         after: String::new(),
         // Vanilla's weather drops texels below 0.1, as Horizon's own weather shader does.
-        terrain_lighting: None,
         alpha_test: Some(horizon_shaders::AlphaTest {
             op: ">",
             reference: 0.1,
         }),
+        item_id_declared: false,
     }
 }
 
@@ -163,7 +163,7 @@ impl PackWeather {
 
 /// A texture holding the atlas's texels under `rect` (normalised x, y, width, height), as
 /// Horizon's weather shader reads them (`weather_texel`).
-fn copy_sprite(
+pub(super) fn copy_sprite(
     device: &wgpu::Device,
     encoder: &mut wgpu::CommandEncoder,
     atlas: &wgpu::Texture,

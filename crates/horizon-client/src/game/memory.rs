@@ -1,151 +1,185 @@
-//! What the game does about memory warnings (iOS's `didReceiveMemoryWarning`).
-//!
-//! iOS has no quota an app can set: Jetsam kills it once its footprint nears
-//! the device's, so the only lever is to free what can be freed. A warning
-//! always releases memory at once (the streaming workers' scratch, the
-//! allocator's free pages); two warnings inside [`WARN_WINDOW`] with a
-//! singleplayer world at a long render distance also lower the *effective*
-//! render distance, and it comes back after [`RESTORE_AFTER`] without
-//! warnings. The options are never written.
+//! `horizon-ctl memory`: what holds the game's memory, by category. The
+//! process's resident set and the allocator's committed bytes say how much;
+//! the census of the client's columns, the integrated server's levels, the
+//! renderer's bookkeeping and the GPU allocator's resources by label say
+//! where it goes. Bytes the census doesn't reach show as the difference.
+use super::Game;
+use horizon_client::chunk::ColumnCensus;
+use horizon_client::fast_hash::FxHashSet;
+use horizon_client::world::World;
+use horizon_threads::capped;
+use serde_json::{Value, json};
+use std::sync::Arc;
 
-use std::time::{Duration, Instant};
+const MB: f64 = 1048576.0;
 
-/// The effective render distance while lowered.
-pub(super) const LOWER_RADIUS: i32 = 6;
-/// Lowering only helps above this render distance; at or below it a warning
-/// just frees memory.
-pub(super) const LOWER_ABOVE: i32 = 8;
-/// A second warning inside this window lowers the render distance.
-const WARN_WINDOW: Duration = Duration::from_secs(60);
-/// Quiet time before the render distance is restored.
-pub(super) const RESTORE_AFTER: Duration = Duration::from_secs(120);
-
-/// The memory warnings' state: when the last one came, how many in a row, and
-/// whether the render distance is lowered.
-#[derive(Default)]
-pub(super) struct Memory {
-    last_warning: Option<Instant>,
-    /// Warnings in the current window (1 after the first).
-    recent: u8,
-    lowered: bool,
+fn mb(bytes: impl TryInto<u64>) -> f64 {
+    let bytes: u64 = bytes.try_into().unwrap_or(0);
+    (bytes as f64 / MB * 10.0).round() / 10.0
 }
 
-impl Memory {
-    /// Notes a warning; true once this is at least the second one inside
-    /// [`WARN_WINDOW`]. Every warning counts, lowered or not, so the restore
-    /// waits for a quiet while rather than the lowering warning alone.
-    pub(super) fn note_warning(&mut self, now: Instant) -> bool {
-        let in_window = self
-            .last_warning
-            .is_some_and(|last| now.duration_since(last) < WARN_WINDOW);
-        self.last_warning = Some(now);
-        if !in_window {
-            self.recent = 1;
-            return false;
-        }
-        self.recent = self.recent.saturating_add(1);
-        self.recent >= 2
-    }
-    pub(super) fn is_lowered(&self) -> bool {
-        self.lowered
-    }
-    pub(super) fn lower(&mut self) {
-        self.lowered = true;
-    }
-    /// The render distance in use: the option, or [`LOWER_RADIUS`] while lowered.
-    pub(super) fn effective(&self, render_distance: i32) -> i32 {
-        if self.lowered {
-            render_distance.min(LOWER_RADIUS)
-        } else {
-            render_distance
+/// The columns of `worlds`, each section counted once however many columns
+/// (or worlds) share it.
+fn census<'a>(worlds: impl IntoIterator<Item = &'a World>) -> ColumnCensus {
+    let mut census = ColumnCensus::default();
+    let mut seen = FxHashSet::default();
+    for world in worlds {
+        for chunk in world.chunks.values() {
+            chunk.census(&mut census, &mut seen);
         }
     }
-    pub(super) fn restore_due(&self, now: Instant) -> bool {
-        self.lowered
-            && self
-                .last_warning
-                .is_none_or(|last| now.duration_since(last) >= RESTORE_AFTER)
-    }
-    pub(super) fn restore(&mut self) {
-        self.lowered = false;
-        self.recent = 0;
-    }
-    /// Left the world: the counts and the lowering belong to it.
-    pub(super) fn close_world(&mut self) {
-        *self = Self::default();
-    }
+    census
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn census_json(c: &ColumnCensus) -> Value {
+    json!({
+        "total_mb": mb(c.total_bytes()),
+        "columns": c.columns,
+        "sections": c.sections,
+        "unique_sections": c.unique_sections,
+        "uniform_block_sections": c.uniform_block_sections,
+        "light_arrays": c.light_arrays,
+        "blocks_mb": mb(c.block_bytes),
+        "biomes_mb": mb(c.biome_bytes),
+        "light_mb": mb(c.light_bytes),
+        "heightmaps_mb": mb(c.heightmap_bytes),
+        "section_records_mb": mb(c.section_record_bytes),
+        "column_records_mb": mb(c.column_bytes),
+    })
+}
 
-    #[test]
-    fn one_warning_does_not_lower() {
-        let mut memory = Memory::default();
-        let now = Instant::now();
-        assert!(!memory.note_warning(now));
-        assert!(!memory.is_lowered());
-        assert!(!memory.restore_due(now));
+/// The sections of `worlds` that are also in `others` (by address), and
+/// their heap bytes: what one copy of them costs.
+fn shared<'a>(
+    worlds: impl IntoIterator<Item = &'a World>,
+    others: &FxHashSet<usize>,
+) -> (usize, usize) {
+    let mut seen = FxHashSet::default();
+    let (mut count, mut bytes) = (0, 0);
+    for world in worlds {
+        for chunk in world.chunks.values() {
+            for section in &chunk.sections {
+                let at = Arc::as_ptr(section) as usize;
+                if others.contains(&at) && seen.insert(at) {
+                    count += 1;
+                    bytes += section.heap_bytes();
+                }
+            }
+        }
+    }
+    (count, bytes)
+}
+
+impl Game<'_> {
+    fn all_worlds(&self) -> impl Iterator<Item = &World> {
+        std::iter::once(&self.world).chain(self.levels.parked_worlds())
+    }
+    /// The census of this game's levels: the one in place and the parked ones.
+    fn level_census(&self) -> ColumnCensus {
+        census(self.all_worlds())
+    }
+    /// The addresses of this game's sections.
+    fn section_addresses(&self) -> FxHashSet<usize> {
+        self.all_worlds()
+            .flat_map(|w| w.chunks.values())
+            .flat_map(|c| c.sections.iter().map(|s| Arc::as_ptr(s) as usize))
+            .collect()
     }
 
-    #[test]
-    fn second_warning_in_the_window_lowers() {
-        let mut memory = Memory::default();
-        let now = Instant::now();
-        assert!(!memory.note_warning(now));
-        assert!(memory.note_warning(now + Duration::from_secs(30)));
-        memory.lower();
-        assert_eq!(memory.effective(12), 6);
-        // Below the lowered distance, the option stays.
-        assert_eq!(memory.effective(4), 4);
-    }
-
-    #[test]
-    fn warnings_far_apart_do_not_lower() {
-        let mut memory = Memory::default();
-        let now = Instant::now();
-        assert!(!memory.note_warning(now));
-        assert!(!memory.note_warning(now + WARN_WINDOW));
-        assert!(!memory.is_lowered());
-    }
-
-    #[test]
-    fn restored_after_a_quiet_while() {
-        let mut memory = Memory::default();
-        let now = Instant::now();
-        memory.note_warning(now);
-        assert!(memory.note_warning(now + Duration::from_secs(1)));
-        memory.lower();
-        assert!(!memory.restore_due(now + RESTORE_AFTER));
-        assert!(memory.restore_due(now + RESTORE_AFTER + Duration::from_secs(1)));
-        memory.restore();
-        assert_eq!(memory.effective(12), 12);
-        assert!(!memory.is_lowered());
-    }
-
-    #[test]
-    fn a_warning_while_lowered_postpones_the_restore() {
-        let mut memory = Memory::default();
-        let now = Instant::now();
-        memory.note_warning(now);
-        memory.note_warning(now + Duration::from_secs(1));
-        memory.lower();
-        // The lowering ignores it, but the quiet while starts over.
-        assert!(memory.note_warning(now + Duration::from_secs(100)));
-        assert!(!memory.restore_due(now + RESTORE_AFTER + Duration::from_secs(1)));
-        assert!(memory.restore_due(now + Duration::from_secs(100) + RESTORE_AFTER));
-    }
-
-    #[test]
-    fn closing_the_world_forgets_everything() {
-        let mut memory = Memory::default();
-        let now = Instant::now();
-        memory.note_warning(now);
-        memory.note_warning(now + Duration::from_secs(1));
-        memory.lower();
-        memory.close_world();
-        assert!(!memory.is_lowered());
-        assert!(!memory.note_warning(now + Duration::from_secs(2)));
+    pub(super) fn memory_report(&self) -> Value {
+        let (commit, peak_commit) = horizon_threads::allocator_commit();
+        let client = self.level_census();
+        // The single-player server thread's own levels: a second copy of the
+        // columns both hold, unless they share sections.
+        let server = self
+            .integrated
+            .as_ref()
+            .and_then(|i| i.call(|g| (g.level_census(), g.section_addresses())));
+        // The server thread's generation: proto chunks waiting for their
+        // neighbours, and the light jobs' views of them.
+        let generation = self.integrated.as_ref().and_then(|i| {
+            i.call(|g| {
+                let c = g.streaming.proto_census();
+                let [blocks, lists, heightmaps, other, biomes, records] = c.bytes;
+                json!({
+                    "protos": c.protos,
+                    "protos_mb": mb(c.bytes.iter().sum::<usize>()),
+                    "proto_blocks_mb": mb(blocks),
+                    "proto_section_lists_mb": mb(lists),
+                    "proto_heightmaps_mb": mb(heightmaps),
+                    "proto_other_terrain_mb": mb(other),
+                    "proto_biomes_mb": mb(biomes),
+                    "proto_records_mb": mb(records),
+                    "proto_sections_by_bits": c.sections_by_bits,
+                    "light_views": c.light_views,
+                    "light_views_mb": mb(c.light_view_bytes),
+                    "caches": c.caches.iter().map(|(name, n, bytes)| json!([name, n, bytes.map(mb)])).collect::<Vec<_>>(),
+                    "stages": g.streaming.stages().iter().map(|(k, v)| json!([k, v])).collect::<Vec<_>>(),
+                })
+            })
+        });
+        // The window's sections the server thread holds too (lan/handoff.rs).
+        let shared = server.as_ref().map(|(_, at)| {
+            let (sections, bytes) = shared(self.all_worlds(), at);
+            json!({ "sections": sections, "mb": mb(bytes) })
+        });
+        let renderer = self.renderer.as_ref().map(|r| {
+            let [arenas, vertices] = r.section_vertex_bytes();
+            let cpu: serde_json::Map<String, Value> = r
+                .cpu_census()
+                .into_iter()
+                .map(|(k, v)| (format!("{k}_mb"), mb(v).into()))
+                .collect();
+            let gpu = r
+                .gpu_memory_by_label()
+                .map(|(allocated, reserved, labels)| {
+                    json!({
+                        "allocated_mb": mb(allocated),
+                        "reserved_mb": mb(reserved),
+                        "by_label_mb": labels
+                            .iter()
+                            .take(40)
+                            .map(|(label, bytes)| json!([label, mb(*bytes)]))
+                            .collect::<Vec<_>>(),
+                    })
+                });
+            json!({
+                "section_arenas_mb": mb(arenas),
+                "section_vertices_mb": mb(vertices),
+                "cpu": cpu,
+                "gpu": gpu,
+            })
+        });
+        json!({
+            "process": {
+                "resident_mb": horizon_threads::memory_limit::resident_bytes().map(mb),
+                "allocator_commit_mb": mb(commit),
+                "allocator_peak_commit_mb": mb(peak_commit),
+                // Bytes the game asked for, against the hard ceiling if one is set.
+                "held_mb": mb(capped::live_bytes()),
+                "held_peak_mb": mb(capped::peak_bytes()),
+                "hard_limit_mb": capped::limit().map(mb),
+                "refused_allocations": capped::refused(),
+            },
+            "render_distance": self.streaming.radius,
+            "client_columns": census_json(&client),
+            "server_columns": server.as_ref().map(|(c, _)| census_json(c)),
+            "shared_with_server": shared,
+            "server_generation": generation,
+            "far_tiles": self.lod.as_ref().map(|lod| {
+                let (active, cached) = lod.stats();
+                json!({ "active": active, "cached": cached })
+            }),
+            "renderer": renderer,
+            // A build with the `alloc-census` feature: the live heap by the
+            // startup step, span or pool job that allocated it, else its thread.
+            "heap_by_tag_mb": horizon_threads::HEAP_CENSUS.then(|| {
+                horizon_threads::heap_census::census()
+                    .into_iter()
+                    .take(60)
+                    .map(|(tag, bytes)| json!([tag, mb(bytes.max(0) as u64)]))
+                    .collect::<Vec<_>>()
+            }),
+        })
     }
 }
