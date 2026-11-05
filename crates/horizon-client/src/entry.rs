@@ -38,6 +38,10 @@ pub fn main_with(mods: crate::mod_api::Mods) {
     if let Some(dir) = game_args.clone().skip_while(|a| *a != "--home").nth(1) {
         logging::set_game_home(std::path::absolute(dir).unwrap_or_else(|_| dir.into()));
     }
+    // A phone has no cable to download the app container with: its log and crash reports sit in
+    // Documents beside the saves, where the Files app can hand them to a bug report.
+    #[cfg(target_os = "ios")]
+    logging::set_game_home(documents.clone());
     // The dedicated server logs in its own folder (--game-dir's), as vanilla's does; the game in its home.
     let (home, side, thread) = if args.iter().any(|a| a == "--dedicated") {
         let folder = game_args
