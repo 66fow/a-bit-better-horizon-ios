@@ -2532,7 +2532,7 @@ impl Renderer {
                 width: size.width.clamp(1, max_side),
                 height: size.height.clamp(1, max_side),
                 present_mode: wgpu::PresentMode::Immediate,
-                desired_maximum_frame_latency: 2,
+                desired_maximum_frame_latency: 3,
                 alpha_mode: wgpu::CompositeAlphaMode::Opaque,
                 view_formats: vec![format],
                 color_space: wgpu::SurfaceColorSpace::default(),
