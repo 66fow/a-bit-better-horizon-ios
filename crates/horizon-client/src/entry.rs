@@ -8,27 +8,36 @@ pub fn main() {
 
 /// Start the game with trait mods in dispatch order.
 pub fn main_with(mods: crate::mod_api::Mods) {
+    boot_stage("entry");
     // First: a trait injection into anything below (logging, the crash handler) calls its mod.
     if crate::mod_api::MODS.set(mods).is_err() {
         log::warn!("Trait mods already installed; ignoring the second list");
     }
+    boot_stage("mods installed");
     horizon_threads::configure_allocator();
+    boot_stage("allocator");
     // Before the event loop: iOS asks for the AirPlay scene's delegate by name when a display connects.
     horizon_airplay::register();
+    boot_stage("airplay registered");
     horizon_airplay::audio::start();
+    boot_stage("airplay audio");
     #[cfg(target_os = "ios")]
     let documents = match into_app_sandbox() {
         Ok(documents) => documents,
         Err(error) => {
+            boot_stage(&format!("no sandbox: {error}"));
             eprintln!("Horizon: {error}");
             std::process::exit(1);
         }
     };
+    #[cfg(target_os = "ios")]
+    boot_stage(&format!("sandbox {}", documents.display()));
     // `android_main` already moved into the app's files folder.
     #[cfg(target_os = "android")]
     let documents = std::env::current_dir().unwrap_or_default();
     horizon_client::telemetry::mark_start();
     horizon_client::spans::startup::init(std::time::Instant::now());
+    boot_stage("telemetry");
     let args: Vec<String> = std::env::args().skip(1).collect();
     let game_args = args.iter().take_while(|a| *a != "--dedicated");
     let help = game_args
@@ -63,6 +72,7 @@ pub fn main_with(mods: crate::mod_api::Mods) {
         }
         (logging::game_home(), "client", "Render thread")
     };
+    boot_stage(&format!("home {}", home.display()));
     if !help {
         logging::init(
             logging::player_dir_override().unwrap_or(home.as_path()),
@@ -70,8 +80,11 @@ pub fn main_with(mods: crate::mod_api::Mods) {
         );
         // The log's first line names the build, so a bug report that carries the log says which one it was.
         log::info!("Horizon {}", crash::version());
+        boot_stage("log open");
         crash::install(home.clone(), side);
+        boot_stage("crash handler");
         ram_limit::start(&home, side);
+        boot_stage("ram limit");
         // What a phone does with its files before the game looks for them, once the log can say so.
         #[cfg(any(target_os = "ios", target_os = "android"))]
         {
@@ -85,6 +98,7 @@ pub fn main_with(mods: crate::mod_api::Mods) {
             // The cable's door: an archive dragged into `Documents` is installed here, so the launch it was
             // dragged for is the one that finds it. `scan` says what it took and what it left alone.
             crate::import::scan(&documents);
+            boot_stage("import done");
         }
     }
     let renderers = crate::mod_api::mods()
@@ -206,7 +220,10 @@ pub fn main_with(mods: crate::mod_api::Mods) {
         log::warn!("Native client hooks already installed; keeping the first callbacks");
     }
     raise_open_file_limit();
+    boot_stage("hooks installed");
+    boot_stage("game loop");
     if let Err(error) = game::run_with() {
+        boot_stage(&format!("game loop failed: {error}"));
         // A bad command line is the caller's mistake, not a crash: no report.
         let usage = error.is::<game::UsageError>();
         log::error!("Horizon: {error}");
@@ -229,6 +246,48 @@ pub fn main_with(mods: crate::mod_api::Mods) {
         });
     }
     logging::flush();
+}
+
+/// Write one startup stage to `Documents/horizon-boot.log`, the first call truncating it.
+///
+/// A phone cannot be watched with a console and the game's own log may never open (a crash before
+/// `logging::init`, a lock a stale instance holds), so the stages are written straight to the folder
+/// the Files app shows, flushed one by one, to say where a launch stopped.
+fn boot_stage(step: &str) {
+    #[cfg(target_os = "ios")]
+    boot::stage(step);
+    #[cfg(not(target_os = "ios"))]
+    let _ = step;
+}
+
+#[cfg(target_os = "ios")]
+mod boot {
+    use std::io::Write;
+    use std::sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    static OPENED: AtomicBool = AtomicBool::new(false);
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+
+    pub fn stage(step: &str) {
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let path = std::path::Path::new(&home).join("Documents/horizon-boot.log");
+        let first = !OPENED.swap(true, Ordering::Relaxed);
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).write(true).truncate(first);
+        // Later stages append, or every open would rewrite the file from its start.
+        options.append(!first);
+        let Ok(mut file) = options.open(&path) else {
+            return;
+        };
+        let start = START.get_or_init(std::time::Instant::now);
+        let _ = writeln!(file, "[{:8.3}] {step}", start.elapsed().as_secs_f64());
+        let _ = file.flush();
+    }
 }
 
 /// The JVM raises its open-file limit to the hard limit as it starts
