@@ -4,10 +4,13 @@
 /// The game window's boot screen, before wgpu's first frame paints over it.
 #[cfg(target_os = "windows")]
 pub mod boot_paint;
-/*
-pub mod capped;
-pub mod heap_census;
-*/
+pub mod capped {
+    pub fn limit() -> Option<usize> { None }
+}
+pub mod heap_census {
+    pub fn tag(_name: &str) {}
+}
+pub const HEAP_CENSUS: bool = false;
 pub mod jobs;
 pub mod memory_limit;
 
@@ -339,31 +342,6 @@ pub fn configure_allocator() {
 /// The bytes the allocator has committed now and at its peak (mimalloc's
 /// process info), for `horizon-ctl memory`.
 pub fn allocator_commit() -> (usize, usize) {
-    let mut info = [0usize; 8];
-    let [
-        elapsed,
-        user,
-        system,
-        rss,
-        peak_rss,
-        commit,
-        peak_commit,
-        faults,
-    ] = &mut info;
-    // SAFETY: writes eight integers through pointers to them.
-    unsafe {
-        libmimalloc_sys::mi_process_info(
-            elapsed,
-            user,
-            system,
-            rss,
-            peak_rss,
-            commit,
-            peak_commit,
-            faults,
-        );
-    }
-    (info[5], info[6])
     (0, 0)
 }
 
@@ -371,15 +349,9 @@ pub fn allocator_commit() -> (usize, usize) {
 /// large was dropped: mimalloc's free pages, then the system heap's, which
 /// native libraries still use: glibc keeps freed pages in the arena of the
 /// thread that allocated them, and macOS in its zones until memory runs short.
-/*
 pub fn release_free_memory() {
-    // SAFETY: frees only pages no allocation uses (this thread's heap, shared arenas).
-    unsafe {
-        libmimalloc_sys::mi_collect(true);
-    }
     release();
 }
-*/
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn release() {
