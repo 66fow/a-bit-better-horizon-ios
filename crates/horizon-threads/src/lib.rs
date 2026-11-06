@@ -627,8 +627,8 @@ mod tests {
         .unwrap();
     }
 
-    /// The option set is the purge delay: mimalloc v3's default for it is
-    /// 1000 ms, and it is 0 once configured.
+    // The option set is the purge delay: mimalloc v3's default for it is
+    // 1000 ms, and it is 0 once configured.
 /*
     #[test]
     fn configuring_the_allocator_purges_at_once() {
