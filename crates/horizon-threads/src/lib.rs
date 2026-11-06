@@ -12,6 +12,8 @@ pub mod capped {
     pub fn refused() -> u64 { 0 }
 }
 pub mod heap_census {
+    pub struct Tag;
+    pub fn tag(_name: &str) -> Tag { Tag }
     pub fn census() -> Vec<(&'static str, isize)> { Vec::new() }
 }
 pub const HEAP_CENSUS: bool = false;
