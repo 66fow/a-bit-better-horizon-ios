@@ -5,7 +5,8 @@
 #[cfg(target_os = "windows")]
 pub mod boot_paint;
 pub mod capped {
-    pub fn limit() -> Option<usize> { None }
+    pub fn limit() -> Option<u64> { None }
+    pub fn set_limit(_limit: Option<u64>) {}
 }
 pub mod heap_census {
     pub fn tag(_name: &str) {}
