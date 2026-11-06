@@ -728,31 +728,14 @@ pub fn memory_use() -> MemoryUse {
     use_
 }
 
-/*
 fn sample_memory() -> MemoryUse {
-    let (mut rss, mut peak_rss) = (0, 0);
-    // SAFETY: every argument but the two out-parameters is a null pointer,
-    // which mimalloc documents as "do not report".
-    unsafe {
-        libmimalloc_sys::mi_process_info(
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut rss,
-            &mut peak_rss,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-    }
     MemoryUse {
-        footprint: footprint().unwrap_or(rss),
-        rss,
-        peak_rss,
+        footprint: footprint().unwrap_or(0),
+        rss: 0,
+        peak_rss: 0,
         available: available_memory(),
     }
 }
-*/
 
 // `mach_task_self_` (`mach/mach_init.h`), the calling task's own Mach port.
 // libc binds it on macOS only, though every Apple platform's libSystem exports
