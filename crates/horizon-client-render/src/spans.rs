@@ -76,12 +76,12 @@ pub fn time<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
 #[must_use = "the span ends when the guard is dropped"]
 pub struct Guard {
     open: Option<(&'static str, Instant, Option<Duration>, u8)>,
-    _heap: Option<horizon_threads::heap_census::Tag>,
+    _heap: Option<()>,
 }
 /// Start a span named `name` that ends when the returned [`Guard`] is dropped.
 #[inline]
 pub fn guard(name: &'static str) -> Guard {
-    let _heap = horizon_threads::heap_tag(name);
+    let _heap = None;
     if !recording_here() {
         return Guard { open: None, _heap };
     }
@@ -352,7 +352,7 @@ pub mod startup {
         started: Instant,
         traced: bool,
         /// A heap-census build's tag for the step's allocations.
-        _heap: Option<horizon_threads::heap_census::Tag>,
+        _heap: Option<()>,
     }
     impl Drop for Step {
         fn drop(&mut self) {
@@ -377,7 +377,7 @@ pub mod startup {
             name,
             started: Instant::now(),
             traced,
-            _heap: horizon_threads::heap_tag(name),
+            _heap: None,
         })
     }
 
