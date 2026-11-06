@@ -7,9 +7,12 @@ pub mod boot_paint;
 pub mod capped {
     pub fn limit() -> Option<u64> { None }
     pub fn set_limit(_limit: Option<u64>) {}
+    pub fn live_bytes() -> u64 { 0 }
+    pub fn peak_bytes() -> u64 { 0 }
+    pub fn refused() -> u64 { 0 }
 }
 pub mod heap_census {
-    pub fn tag(_name: &str) {}
+    pub fn census() -> Vec<(&'static str, isize)> { Vec::new() }
 }
 pub const HEAP_CENSUS: bool = false;
 pub mod jobs;
@@ -339,6 +342,8 @@ pub fn configure_allocator() {
     }
 }
 */
+
+pub fn configure_allocator() {}
 
 /// The bytes the allocator has committed now and at its peak (mimalloc's
 /// process info), for `horizon-ctl memory`.
