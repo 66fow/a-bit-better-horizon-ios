@@ -640,8 +640,8 @@ mod tests {
         super::configure_allocator();
         assert_eq!(get(), 0);
     }
-}
 */
+}
 
 #[cfg(all(test, windows))]
 mod junction_tests {
